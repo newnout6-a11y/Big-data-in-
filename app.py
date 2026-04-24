@@ -84,6 +84,35 @@ def похоже_на_библиографию(текст):
     return (скобки + нум + et_al + doi + http + годы + авторы + маркеры_бд) >= 6
 
 
+_МУСОРНЫЕ_МАРКЕРЫ = (
+    "licensed under a creative commons",
+    "creativecommons.org/licenses",
+    "view article online",
+    "cc by license",
+    "cc by-nc",
+    "all rights reserved",
+    "rights reserved",
+    "published by elsevier",
+    "open access article",
+    "this journal is ©",
+    "this is an open access",
+)
+
+
+def похоже_на_мусор(текст):
+    """Колонтитулы журналов и развалившиеся таблицы из PDF — бесполезны для LLM."""
+    т = текст.lower().strip()
+    if len(т) < 60:
+        return True
+    if any(маркер in т for маркер in _МУСОРНЫЕ_МАРКЕРЫ):
+        return True
+    # Поток чисел из таблицы: если >60% символов — цифры/пробелы/разделители → мусор
+    числовых = sum(1 for с in т if с.isdigit() or с in " .,()/-+")
+    if числовых / len(т) > 0.6:
+        return True
+    return False
+
+
 def найти_похожие(вопрос, выбранный_кейс, количество):
     модель = загрузить_модель()
     клиент = загрузить_qdrant()
@@ -106,6 +135,7 @@ def найти_похожие(вопрос, выбранный_кейс, кол�
     содержательные = [
         точка for точка in ответ.points
         if not похоже_на_библиографию(точка.payload.get("text", ""))
+        and not похоже_на_мусор(точка.payload.get("text", ""))
     ]
 
     if not содержательные:
