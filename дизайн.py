@@ -127,6 +127,14 @@ code, pre, .mono {font-family: 'Geist Mono', monospace !important;}
 .source-row a.doc::after {content: " ↗"; color: var(--text-dim); font-size: 0.75rem; opacity: 0.6;}
 .source-row .pages {color: var(--text-dim); white-space: nowrap;}
 
+.cite {position: relative; display: inline; color: #93c5fd; cursor: help; font-weight: 500; padding: 0 3px; border-radius: 3px; transition: background 0.15s ease;}
+.cite:hover {background: rgba(147, 197, 253, 0.18);}
+.cite-tip {visibility: hidden; opacity: 0; position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); width: 420px; max-width: 92vw; background: #0f172a; border: 1px solid #334155; padding: 0.95rem 1.1rem; border-radius: 10px; font-family: 'Inter', system-ui, sans-serif; font-weight: 400; color: var(--text); line-height: 1.55; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55); z-index: 1000; transition: opacity 0.18s ease, visibility 0.18s ease; pointer-events: none; text-align: left;}
+.cite-tip::after {content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 6px solid transparent; border-top-color: #334155;}
+.cite:hover .cite-tip {visibility: visible; opacity: 1;}
+.cite-doc {display: block; font-family: 'Geist Mono', monospace; font-size: 0.7rem; color: var(--text-dim); margin-bottom: 0.55rem; text-transform: uppercase; letter-spacing: 0.06em; word-break: break-word;}
+.cite-text {display: block; color: var(--text); font-size: 0.86rem; word-break: break-word;}
+
 .streamlit-expanderHeader, [data-testid="stExpander"] summary {background: var(--bg-soft) !important; border: 1px solid var(--border) !important; border-radius: 8px !important; color: var(--text-muted) !important; font-weight: 400 !important; transition: all 0.2s;}
 .streamlit-expanderHeader:hover, [data-testid="stExpander"] summary:hover {color: var(--text) !important; border-color: var(--border-strong) !important;}
 .streamlit-expanderHeader p, [data-testid="stExpander"] summary p {font-family: 'Geist Mono', monospace !important; font-size: 0.85rem !important;}
