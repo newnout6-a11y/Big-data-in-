@@ -121,7 +121,7 @@ code, pre, .mono {font-family: 'Geist Mono', monospace !important;}
 
 .source-row {display: flex; gap: 1.5rem; padding: 1rem 0; border-bottom: 1px solid var(--border); font-family: 'Geist Mono', monospace; font-size: 0.85rem; transition: padding-left 0.2s ease; align-items: baseline;}
 .source-row:hover {padding-left: 0.5rem;}
-.source-row .num {color: var(--text-dim); min-width: 2rem;}
+.source-row .num {color: #93c5fd; min-width: 4rem; font-weight: 500;}
 .source-row .doc {color: var(--text); flex: 1; word-break: break-word; text-decoration: none; border-bottom: 1px dashed transparent; transition: border-color 0.2s ease, color 0.2s ease;}
 .source-row a.doc:hover {color: #93c5fd; border-bottom-color: #93c5fd;}
 .source-row a.doc::after {content: " ↗"; color: var(--text-dim); font-size: 0.75rem; opacity: 0.6;}
@@ -418,26 +418,31 @@ def красивое_имя_файла(имя):
 
 
 def построить_источники_html(фрагменты):
-    """Группирует фрагменты по документу, собирает HTML-блок источников."""
+    """Группирует фрагменты по документу. В первой колонке вместо порядкового
+    номера показывает список номеров маркеров [N] из этой группы — чтобы у
+    каждого маркера в тексте была видимая строка-подтверждение в источниках,
+    даже когда несколько маркеров ведут на один и тот же документ."""
     группы = {}
     порядок = []
-    for фр in фрагменты:
+    for номер_маркера, фр in enumerate(фрагменты, 1):
         имя = фр["document"]
         стр = фр["page"]
         if имя not in группы:
-            группы[имя] = []
+            группы[имя] = {"страницы": [], "маркеры": []}
             порядок.append(имя)
-        if стр not in группы[имя]:
-            группы[имя].append(стр)
+        if стр not in группы[имя]["страницы"]:
+            группы[имя]["страницы"].append(стр)
+        группы[имя]["маркеры"].append(номер_маркера)
 
     строки = ""
-    for i, док in enumerate(порядок, 1):
-        страницы = ", ".join(str(p) for p in sorted(группы[док]))
+    for док in порядок:
+        страницы = ", ".join(str(p) for p in sorted(группы[док]["страницы"]))
+        маркеры = ", ".join(str(n) for n in группы[док]["маркеры"])
         имя = красивое_имя_файла(док)
         url = ссылка_на_scholar(док)
         строки += (
             f'<div class="source-row">'
-            f'<span class="num">{i:02d}</span>'
+            f'<span class="num">[{маркеры}]</span>'
             f'<a class="doc" href="{url}" target="_blank" rel="noopener" '
             f'title="Открыть в Google Scholar">{имя}</a>'
             f'<span class="pages">стр. {страницы}</span>'
