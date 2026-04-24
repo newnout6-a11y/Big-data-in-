@@ -1,0 +1,8 @@
+streamlit
+sentence-transformers
+qdrant-client
+pypdf
+python-docx
+reportlab
+groq
+python-dotenv

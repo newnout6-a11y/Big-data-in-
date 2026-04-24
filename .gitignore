@@ -1,0 +1,36 @@
+# Секреты — КРИТИЧНО, никогда не пушить
+.env
+.env.*
+!.env.example
+
+# Векторная БД (большая, регенерируется через embed_resume.py)
+qdrant_db/
+
+# Выход из ingest.py (40+ МБ, генерируется)
+chunks.jsonl
+
+# Сырые PDF (сотни МБ, не в репо)
+all_pdfs/
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Временные файлы runtime
+_tunnel*.log
+qr.png
+
+# IDE / OS
+.vscode/
+.idea/
+.windsurf/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Виртуальные окружения
+venv/
+.venv/
+env/
