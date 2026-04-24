@@ -122,7 +122,9 @@ code, pre, .mono {font-family: 'Geist Mono', monospace !important;}
 .source-row {display: flex; gap: 1.5rem; padding: 1rem 0; border-bottom: 1px solid var(--border); font-family: 'Geist Mono', monospace; font-size: 0.85rem; transition: padding-left 0.2s ease; align-items: baseline;}
 .source-row:hover {padding-left: 0.5rem;}
 .source-row .num {color: var(--text-dim); min-width: 2rem;}
-.source-row .doc {color: var(--text); flex: 1; word-break: break-word;}
+.source-row .doc {color: var(--text); flex: 1; word-break: break-word; text-decoration: none; border-bottom: 1px dashed transparent; transition: border-color 0.2s ease, color 0.2s ease;}
+.source-row a.doc:hover {color: #93c5fd; border-bottom-color: #93c5fd;}
+.source-row a.doc::after {content: " ↗"; color: var(--text-dim); font-size: 0.75rem; opacity: 0.6;}
 .source-row .pages {color: var(--text-dim); white-space: nowrap;}
 
 .streamlit-expanderHeader, [data-testid="stExpander"] summary {background: var(--bg-soft) !important; border: 1px solid var(--border) !important; border-radius: 8px !important; color: var(--text-muted) !important; font-weight: 400 !important; transition: all 0.2s;}
@@ -384,6 +386,19 @@ _расширенные_кейсы = {
 #  Утилиты форматирования HTML
 # =====================================================================
 
+def ссылка_на_scholar(имя_файла):
+    """Делает ссылку на Google Scholar по имени документа.
+    Комиссия может проверить что статья реально существует."""
+    from urllib.parse import quote_plus
+    основа = имя_файла
+    for расширение in (".pdf", ".docx", ".doc"):
+        if основа.lower().endswith(расширение):
+            основа = основа[: -len(расширение)]
+            break
+    запрос = основа.replace("_", " ").replace("-", " ").strip()
+    return f"https://scholar.google.com/scholar?q={quote_plus(запрос)}"
+
+
 def красивое_имя_файла(имя):
     """Убирает .pdf, подчёркивания, лишние тире — делает заголовок читаемым."""
     без_расширения = имя[:-4] if имя.lower().endswith(".pdf") else имя
@@ -411,10 +426,12 @@ def построить_источники_html(фрагменты):
     for i, док in enumerate(порядок, 1):
         страницы = ", ".join(str(p) for p in sorted(группы[док]))
         имя = красивое_имя_файла(док)
+        url = ссылка_на_scholar(док)
         строки += (
             f'<div class="source-row">'
             f'<span class="num">{i:02d}</span>'
-            f'<span class="doc">{имя}</span>'
+            f'<a class="doc" href="{url}" target="_blank" rel="noopener" '
+            f'title="Открыть в Google Scholar">{имя}</a>'
             f'<span class="pages">стр. {страницы}</span>'
             f'</div>'
         )
