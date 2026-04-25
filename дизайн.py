@@ -128,23 +128,61 @@ code, pre, .mono {font-family: 'Geist Mono', monospace !important;}
 .source-row .pages {color: var(--text-dim); white-space: nowrap;}
 
 .cite {position: relative; display: inline; color: #93c5fd; cursor: help; font-weight: 500; padding: 0 3px; border-radius: 3px; transition: background 0.15s ease;}
-.cite:hover {background: rgba(147, 197, 253, 0.18);}
-/* Тултип ПОД маркером (top: 100%), а не НАД (bottom: 100%):
-   - Сверху страницы тултип не обрезается за верхний край viewport.
-   - Если он уходит ниже окна — браузер позволяет прокрутить страницу.
-   ::before — невидимый "мост" сверху тултипа, перекрывающий 10px gap
-   между маркером и тултипом. Без него курсор при переходе с маркера
-   на тултип теряет hover в gap-области и тултип закрывается.
-   ::after — стрелочка-уголок снизу маркера (указывает вверх на маркер). */
-.cite-tip {visibility: hidden; opacity: 0; position: absolute; top: calc(100% + 10px); bottom: auto; left: -10px; transform: none; width: 380px; max-width: min(380px, calc(100vw - 2rem)); max-height: 360px; overflow-y: auto; background: #0f172a; border: 1px solid #334155; padding: 0.95rem 1.1rem; border-radius: 10px; font-family: 'Inter', system-ui, sans-serif; font-weight: 400; color: var(--text); line-height: 1.55; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55); z-index: 1000; transition: opacity 0.18s ease, visibility 0.18s ease; pointer-events: none; text-align: left;}
-.cite-tip::before {content: ''; position: absolute; top: -10px; left: 0; right: 0; height: 10px; background: transparent;}
-.cite-tip::after {content: ''; position: absolute; bottom: 100%; top: auto; left: 16px; transform: none; border: 6px solid transparent; border-bottom-color: #334155;}
-/* При наведении на маркер — тултип становится interactive: можно прокрутить
-   колёсиком мыши, выделить текст. Без этого pointer-events: none блокировал
-   wheel-события и прокрутка не работала. Поскольку .cite-tip является
-   child .cite, hover на самом тултипе сохраняет hover родителя — тултип
-   не закрывается пока курсор на нём. */
-.cite:hover .cite-tip {visibility: visible; opacity: 1; pointer-events: auto;}
+.cite:hover {background: rgba(147, 197, 253, 0.22); box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.4);}
+/* Тултип цитаты — position: fixed в правом нижнем углу viewport.
+   Раньше был position: absolute привязанный к маркеру, но тогда:
+   - При маркере близко к правому краю — тултип обрезался справа.
+   - При маркере в верхней части страницы — тултип обрезался сверху.
+   - При длинной цитате — нельзя было прокрутить (gap между маркером
+     и тултипом курсор пересекал, hover терялся).
+
+   Fixed-positioning в углу viewport решает все три проблемы:
+   тултип всегда полностью виден, не зависит от расположения маркера,
+   pointer-events: auto при hover работает корректно. Подсветка
+   маркера (box-shadow + bg) даёт визуальную обратную связь, что
+   именно эта цитата сейчас открыта. */
+.cite-tip {
+    visibility: hidden;
+    opacity: 0;
+    position: fixed;
+    bottom: 2rem;
+    right: 2rem;
+    top: auto;
+    left: auto;
+    width: 420px;
+    max-width: calc(100vw - 4rem);
+    max-height: min(60vh, 480px);
+    overflow-y: auto;
+    background: #0f172a;
+    border: 1px solid #334155;
+    padding: 1.1rem 1.25rem;
+    border-radius: 12px;
+    font-family: 'Inter', system-ui, sans-serif;
+    font-weight: 400;
+    color: var(--text);
+    line-height: 1.55;
+    box-shadow: 0 24px 48px -8px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(147, 197, 253, 0.08);
+    z-index: 1000;
+    pointer-events: none;
+    text-align: left;
+    transform: translateY(8px);
+    /* transition-delay 0.25s ТОЛЬКО при скрытии — даёт время перевести курсор
+       с маркера на тултип. Появление мгновенное (delay 0s в hover-правиле).
+       Без этого тултип закрывался бы сразу при уходе курсора с маркера, и
+       прокрутить или выделить текст в тултипе было бы невозможно. */
+    transition: opacity 0.2s ease 0.25s, visibility 0s ease 0.45s, transform 0.2s ease 0.25s;
+}
+/* Двойной триггер: тултип видим если курсор на маркере ИЛИ на самом тултипе.
+   Работает потому что при position: fixed тултип получает свои hover-события
+   независимо от родителя. transition-delay: 0s — появление без задержки. */
+.cite:hover .cite-tip,
+.cite-tip:hover {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+    transition: opacity 0.2s ease, visibility 0s, transform 0.2s ease;
+}
 .cite-doc {display: block; font-family: 'Geist Mono', monospace; font-size: 0.7rem; color: var(--text-dim); margin-bottom: 0.55rem; text-transform: uppercase; letter-spacing: 0.06em; word-break: break-word;}
 .cite-text {display: block; color: var(--text); font-size: 0.86rem; word-break: break-word;}
 
