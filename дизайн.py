@@ -131,7 +131,12 @@ code, pre, .mono {font-family: 'Geist Mono', monospace !important;}
 .cite:hover {background: rgba(147, 197, 253, 0.18);}
 .cite-tip {visibility: hidden; opacity: 0; position: absolute; bottom: calc(100% + 10px); left: -10px; transform: none; width: 380px; max-width: min(380px, calc(100vw - 2rem)); max-height: 360px; overflow-y: auto; background: #0f172a; border: 1px solid #334155; padding: 0.95rem 1.1rem; border-radius: 10px; font-family: 'Inter', system-ui, sans-serif; font-weight: 400; color: var(--text); line-height: 1.55; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55); z-index: 1000; transition: opacity 0.18s ease, visibility 0.18s ease; pointer-events: none; text-align: left;}
 .cite-tip::after {content: ''; position: absolute; top: 100%; left: 16px; transform: none; border: 6px solid transparent; border-top-color: #334155;}
-.cite:hover .cite-tip {visibility: visible; opacity: 1;}
+/* При наведении на маркер — тултип становится interactive: можно прокрутить
+   колёсиком мыши, выделить текст. Без этого pointer-events: none блокировал
+   wheel-события и прокрутка не работала. Поскольку .cite-tip является
+   child .cite, hover на самом тултипе сохраняет hover родителя — тултип
+   не закрывается пока курсор на нём. */
+.cite:hover .cite-tip {visibility: visible; opacity: 1; pointer-events: auto;}
 .cite-doc {display: block; font-family: 'Geist Mono', monospace; font-size: 0.7rem; color: var(--text-dim); margin-bottom: 0.55rem; text-transform: uppercase; letter-spacing: 0.06em; word-break: break-word;}
 .cite-text {display: block; color: var(--text); font-size: 0.86rem; word-break: break-word;}
 
