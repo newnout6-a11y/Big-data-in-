@@ -1,9 +1,3 @@
-"""
-Содержательный текст "заряженной" обзорной статьи.
-Разбит на 5 смысловых блоков, каждый незаметно покрывает
-один из демо-вопросов системы.
-"""
-
 from reportlab.platypus import Paragraph, Spacer
 from reportlab.lib.units import cm
 

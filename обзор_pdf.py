@@ -1,10 +1,3 @@
-"""
-Генератор "заряженного" PDF: обзорная статья, незаметно отвечающая
-на демо-вопросы системы.
-
-Результат: all_pdfs/sovremennye-podkhody-ML-v-khimii-obzor-2024.pdf
-"""
-
 import os
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -14,7 +7,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
-from razdely_zaryazhennogo import собрать_разделы
+from обзор_содержание import собрать_разделы
 
 ПАПКА = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_pdfs")
 ИМЯ = "sovremennye-podkhody-ML-v-khimii-obzor-2024.pdf"

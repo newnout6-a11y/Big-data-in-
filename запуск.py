@@ -12,14 +12,13 @@ import qrcode
 
 
 def завершить_старые():
-    # Старые туннели
     for имя in ("cloudflared.exe", "ssh.exe"):
         try:
             subprocess.run(["taskkill", "/F", "/IM", имя], capture_output=True)
         except Exception:
             pass
 
-    # Всё что слушает порт 8501 (старый Streamlit)
+
     try:
         netstat = subprocess.run(
             ["netstat", "-ano", "-p", "tcp"],
@@ -36,7 +35,7 @@ def завершить_старые():
     except Exception:
         pass
 
-    # Любые python-процессы, запускающие наш app.py (на случай если висят без порта)
+
     try:
         subprocess.run(
             ["powershell", "-NoProfile", "-Command",
@@ -51,7 +50,6 @@ def завершить_старые():
 
 
 def подготовить_лог():
-    """Освобождаем _tunnel.log. Если занят — ретрай, иначе уникальное имя."""
     global путь_лога
     for _ in range(6):
         try:
