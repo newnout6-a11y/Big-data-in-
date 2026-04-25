@@ -247,6 +247,122 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
 .term-value {color: var(--text);}
 .term-formula {background: rgba(250, 250, 250, 0.04); border-left: 2px solid var(--text); padding: 0.75rem 1rem; margin: 0.5rem 0; color: var(--text); font-weight: 500; display: inline-block;}
 .term-caret {color: var(--text); animation: blink 1s step-start infinite;}
+
+/* ============================================================
+   Адаптация для мобильных и планшетов
+   Главные принципы: уменьшить padding, схлопнуть многоколоночные
+   гриды в 1-2 колонки, уменьшить размеры шрифтов, разрешить
+   горизонтальный скролл для tabs.
+   ============================================================ */
+
+@media (max-width: 768px) {
+    /* Контейнер: минимальные поля */
+    .block-container {padding: 1.25rem 1rem 2rem 1rem !important;}
+
+    /* Навигация: вертикально */
+    .nav {flex-direction: column; align-items: flex-start; gap: 0.85rem; padding-bottom: 1.25rem; margin-bottom: 2.25rem;}
+    .nav-meta {gap: 1.25rem; font-size: 0.7rem; flex-wrap: wrap;}
+
+    /* Hero: меньше шрифт, прячем фон-точки */
+    .hero-block {margin: 0 0 2.5rem 0;}
+    .hero-block::before {display: none;}
+    .hero-kicker {font-size: 0.6rem; letter-spacing: 0.18em; margin-bottom: 1rem;}
+    .hero-title {font-size: 2.4rem; line-height: 1.05; margin: 0 0 1.1rem 0;}
+    .hero-desc {font-size: 0.95rem; line-height: 1.55;}
+
+    /* Статистика: 4 → 2 колонки */
+    .stats-grid {grid-template-columns: repeat(2, 1fr); gap: 1.5rem 1.25rem; margin: 3rem 0 2.5rem 0;}
+    .stat-value {font-size: 1.85rem;}
+    .stat-label {font-size: 0.65rem; letter-spacing: 0.16em;}
+
+    /* Маркиза */
+    .marquee {margin: 3rem 0 2rem 0; padding: 1.1rem 0;}
+    .marquee-track {gap: 2.5rem;}
+    .marquee-item {font-size: 0.72rem; letter-spacing: 0.12em;}
+    .marquee-item::before {margin-right: 0.6rem;}
+
+    /* Подсказка скролла */
+    .scroll-hint {margin: 2rem 0 3rem 0;}
+    .scroll-hint-line {height: 36px;}
+
+    /* Tabs: горизонтальный скролл вместо обрезки */
+    .stTabs [data-baseweb="tab-list"] {overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: none;}
+    .stTabs [data-baseweb="tab-list"]::-webkit-scrollbar {display: none;}
+    .stTabs [data-baseweb="tab"] {padding: 0.85rem 0; margin-right: 1.5rem; font-size: 0.85rem; white-space: nowrap; flex-shrink: 0;}
+    .stTabs [aria-selected="true"]::after {right: 0;}
+    .stTabs [data-baseweb="tab-panel"] {padding-top: 2rem;}
+
+    /* Формы */
+    .stTextArea textarea {font-size: 1rem !important; padding: 1.1rem !important;}
+    .stButton button[kind="primary"] {height: 48px; width: 100%; padding: 0 1.4rem;}
+    .stSelectbox label, .stSlider label {font-size: 0.7rem !important;}
+
+    /* Ответ */
+    .answer-container {margin-top: 2.25rem; padding-top: 1.6rem;}
+    .answer-meta {font-size: 0.68rem; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem;}
+    .answer-body {font-size: 0.98rem; line-height: 1.65;}
+
+    /* Источники: вертикальная компоновка чтобы длинные имена не обрезались */
+    .source-row {flex-direction: column; align-items: flex-start; gap: 0.35rem; padding: 0.85rem 0; font-size: 0.78rem;}
+    .source-row:hover {padding-left: 0;}
+    .source-row .num {min-width: auto;}
+    .source-row .pages {white-space: normal;}
+
+    /* Тултипы цитат: ужe и центрированы по viewport */
+    .cite-tip {left: 0; width: min(320px, calc(100vw - 1.5rem)); max-width: calc(100vw - 1.5rem); font-size: 0.85rem; padding: 0.85rem 0.95rem; max-height: 280px;}
+    .cite-tip::after {left: 12px;}
+
+    /* Фичи: 3 → 1 колонка */
+    .features-grid {grid-template-columns: 1fr; gap: 1rem; margin: 2.5rem 0;}
+    .feature-card {padding: 1.5rem;}
+    .feature-icon {width: 36px; height: 36px; margin-bottom: 1.1rem;}
+
+    /* Tech-row: 2 фиксированные колонки → 1 колонка с двумя строками */
+    .tech-row {grid-template-columns: 1fr; padding: 0.95rem 0; gap: 0.35rem;}
+    .tech-row:hover {padding-left: 0;}
+    .tech-val .hint {display: block; margin-left: 0; margin-top: 0.15rem;}
+
+    /* Pipeline: 3 фиксированные колонки → 2 колонки + перенос описания */
+    .pipeline-step {grid-template-columns: 36px 1fr; row-gap: 0.35rem; column-gap: 0.85rem; padding: 0.95rem 0; font-size: 0.85rem;}
+    .pipeline-step .pipeline-num {grid-row: 1; grid-column: 1;}
+    .pipeline-step .pipeline-tag {grid-row: 1; grid-column: 2; font-size: 0.72rem;}
+    .pipeline-step .pipeline-desc {grid-row: 2; grid-column: 1 / span 2; font-size: 0.85rem;}
+    .pipeline-step:hover {padding-left: 0;}
+
+    /* Кейсы: компактнее */
+    details.case-details summary {grid-template-columns: 38px 1fr 28px; padding: 1.25rem 0; gap: 0.75rem;}
+    details.case-details summary:hover {padding-left: 0;}
+    .case-num {font-size: 0.72rem;}
+    .case-title {font-size: 1rem;}
+    .case-desc {font-size: 0.88rem;}
+    .case-toggle {font-size: 1.4rem;}
+    .case-expanded {padding: 0.5rem 0 1.5rem 38px;}
+    .case-exp-list li {font-size: 0.88rem;}
+    .case-exp-quote {font-size: 0.9rem; padding: 0.85rem 1rem;}
+
+    /* Терминал: меньше высота для scroll-pinned анимации */
+    .terminal-stage {height: 200vh;}
+    .terminal-sticky {top: 5vh;}
+    .terminal-head {padding: 0.7rem 1rem;}
+    .terminal-title {font-size: 0.7rem; margin-left: 0.6rem;}
+    .terminal-body {padding: 1rem 1.1rem; font-size: 0.78rem; line-height: 1.7;}
+    .term-formula {padding: 0.6rem 0.8rem; font-size: 0.85rem;}
+
+    /* Streamlit-экспандеры */
+    .streamlit-expanderHeader p, [data-testid="stExpander"] summary p {font-size: 0.78rem !important;}
+    .streamlit-expanderContent, [data-testid="stExpander"] [data-testid="stExpanderDetails"] {padding: 1rem !important;}
+
+    hr {margin: 1.75rem 0 !important;}
+}
+
+/* Совсем узкие телефоны (≤ 480px) */
+@media (max-width: 480px) {
+    .hero-title {font-size: 2rem;}
+    .stat-value {font-size: 1.6rem;}
+    .feature-card {padding: 1.25rem;}
+    .case-title {font-size: 0.95rem;}
+    .case-desc {font-size: 0.85rem;}
+}
 </style>
 """
 
