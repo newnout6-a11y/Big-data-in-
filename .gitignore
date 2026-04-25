@@ -34,3 +34,6 @@ Thumbs.db
 venv/
 .venv/
 env/
+
+# Бэкапы перед ingest
+*.bak
