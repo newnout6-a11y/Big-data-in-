@@ -312,7 +312,9 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
        Раньше при position: absolute с left: -10px тултип уходил за правый
        край экрана, если маркер стоит ближе к концу строки. position: fixed
        привязывает тултип к viewport, а не к маркеру — обрезка невозможна.
-       Стрелочку прячем: с fixed-positioning она бы указывала никуда. */
+       Стрелочку прячем: с fixed-positioning она бы указывала никуда.
+       pointer-events: auto обязательно — иначе на тачскрине палец проходит
+       сквозь тултип и его нельзя прокрутить если контент длиннее экрана. */
     .cite-tip {
         position: fixed !important;
         top: 50% !important;
@@ -322,7 +324,10 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
         width: auto !important;
         max-width: none !important;
         transform: translateY(-50%) !important;
-        max-height: 70vh !important;
+        max-height: 75vh !important;
+        overflow-y: auto !important;
+        pointer-events: auto !important;
+        -webkit-overflow-scrolling: touch !important;
         font-size: 0.88rem;
         padding: 1rem 1.1rem;
     }
