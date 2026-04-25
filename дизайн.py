@@ -308,9 +308,25 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
     .source-row .num {min-width: auto;}
     .source-row .pages {white-space: normal;}
 
-    /* Тултипы цитат: ужe и центрированы по viewport */
-    .cite-tip {left: 0; width: min(320px, calc(100vw - 1.5rem)); max-width: calc(100vw - 1.5rem); font-size: 0.85rem; padding: 0.85rem 0.95rem; max-height: 280px;}
-    .cite-tip::after {left: 12px;}
+    /* Тултипы цитат на мобильном: position: fixed по центру viewport.
+       Раньше при position: absolute с left: -10px тултип уходил за правый
+       край экрана, если маркер стоит ближе к концу строки. position: fixed
+       привязывает тултип к viewport, а не к маркеру — обрезка невозможна.
+       Стрелочку прячем: с fixed-positioning она бы указывала никуда. */
+    .cite-tip {
+        position: fixed !important;
+        top: 50% !important;
+        bottom: auto !important;
+        left: 0.75rem !important;
+        right: 0.75rem !important;
+        width: auto !important;
+        max-width: none !important;
+        transform: translateY(-50%) !important;
+        max-height: 70vh !important;
+        font-size: 0.88rem;
+        padding: 1rem 1.1rem;
+    }
+    .cite-tip::after {display: none !important;}
 
     /* Фичи: 3 → 1 колонка */
     .features-grid {grid-template-columns: 1fr; gap: 1rem; margin: 2.5rem 0;}
