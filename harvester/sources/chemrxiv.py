@@ -1,6 +1,13 @@
 """chemRxiv: публичный JSON API.
 
 https://chemrxiv.org/engage/api-gateway/chemrxiv/public/v1/items
+
+С 2025 года chemRxiv стоит за Cloudflare bot-protection ("Just a moment…").
+Стандартный httpx-запрос получает 403 + HTML-челлендж. На пользовательских
+браузерных IP может проходить, на дата-центровых обычно нет. Если 403 —
+тихо пропускаем, печатаем понятное предупреждение, harvester продолжает
+работу с другими источниками. Альтернатива: chemRxiv-материалы дублируются
+в OpenAlex (cheminformatics/chemistry концепты), которые мы уже качаем.
 """
 from __future__ import annotations
 
@@ -13,6 +20,10 @@ from .arxiv import Документ
 
 
 БАЗА = "https://chemrxiv.org/engage/api-gateway/chemrxiv/public/v1/items"
+_БРАУЗЕРНЫЙ_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 def собрать(
@@ -25,17 +36,39 @@ def собрать(
 ) -> Iterator[Документ]:
     отдано = 0
     текущий_skip = skip
-    клиент = httpx.Client(timeout=таймаут, headers={"User-Agent": user_agent})
+    # Браузерный UA + Accept: chemRxiv API за Cloudflare, дефолтный httpx-UA
+    # ловит 403 + HTML-челлендж. Браузерный UA иногда проходит.
+    клиент = httpx.Client(
+        timeout=таймаут,
+        headers={
+            "User-Agent": _БРАУЗЕРНЫЙ_UA,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://chemrxiv.org/",
+        },
+    )
     try:
         while отдано < бюджет:
             к_странице = min(размер_страницы, бюджет - отдано)
             try:
                 ответ = клиент.get(БАЗА, params={"skip": текущий_skip, "limit": к_странице, "sort": "PUBLISHED_DATE_DESC"})
+                if ответ.status_code == 403 and "html" in ответ.headers.get("content-type", "").lower():
+                    print(
+                        "[chemrxiv] 403 от Cloudflare bot-protection — пропускаю, "
+                        "chemRxiv-материалы тянутся через OpenAlex (концепт chemistry/cheminformatics)",
+                        flush=True,
+                    )
+                    break
                 ответ.raise_for_status()
-            except httpx.HTTPError:
+            except httpx.HTTPError as e:
+                print(f"[chemrxiv] сеть упала: {type(e).__name__} — пропускаю", flush=True)
                 time.sleep(3)
                 break
-            данные = ответ.json()
+            try:
+                данные = ответ.json()
+            except ValueError:
+                print("[chemrxiv] не-JSON ответ — пропускаю", flush=True)
+                break
             записи = данные.get("itemHits") or данные.get("items") or []
             if not записи:
                 break

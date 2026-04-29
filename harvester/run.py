@@ -344,9 +344,20 @@ def запустить(args):
         return 2
 
     состояние = state.прочитать()
+    # Браузерные заголовки повышают шансы пройти Cloudflare/CF-капчи
+    # (КиберЛенинка, NEJM, Cell и т.п.). На честных научных эндпоинтах не мешает.
     клиент_pdf = httpx.Client(
         timeout=120,
-        headers={"User-Agent": _ua(args)},
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/pdf,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+            "Referer": "https://www.google.com/",
+            "X-Harvester-Email": args.email or "unknown",
+        },
     )
 
     бюджет_per = max(1, args.budget // len(источники))

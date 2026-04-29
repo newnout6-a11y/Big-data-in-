@@ -74,6 +74,65 @@ def test_cyberleninka_parses_oai():
     assert tok == "tok123"
 
 
+def test_cyberleninka_фильтрует_не_по_теме():
+    """Педагогика/филология должна отсеиваться, химия и IT — пропускаться."""
+    xml = """<?xml version="1.0"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <ListRecords>
+    <record>
+      <header><identifier>oai:cyber:p1</identifier><datestamp>2024-01-01</datestamp></header>
+      <metadata><oai_dc:dc xmlns:oai_dc="http://www.openarchives.org/OAI/2.0/oai_dc/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:title>Подготовка педагогических кадров в колледже</dc:title>
+        <dc:identifier>https://cyberleninka.ru/article/n/p1</dc:identifier>
+      </oai_dc:dc></metadata>
+    </record>
+    <record>
+      <header><identifier>oai:cyber:c1</identifier><datestamp>2024-01-01</datestamp></header>
+      <metadata><oai_dc:dc xmlns:oai_dc="http://www.openarchives.org/OAI/2.0/oai_dc/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:title>Каталитический синтез наноматериалов</dc:title>
+        <dc:identifier>https://cyberleninka.ru/article/n/c1</dc:identifier>
+      </oai_dc:dc></metadata>
+    </record>
+    <record>
+      <header><identifier>oai:cyber:i1</identifier><datestamp>2024-01-01</datestamp></header>
+      <metadata><oai_dc:dc xmlns:oai_dc="http://www.openarchives.org/OAI/2.0/oai_dc/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:title>Применение нейронных сетей в обработке данных</dc:title>
+        <dc:identifier>https://cyberleninka.ru/article/n/i1</dc:identifier>
+      </oai_dc:dc></metadata>
+    </record>
+  </ListRecords>
+</OAI-PMH>"""
+    with patch("harvester.sources.cyberleninka.httpx.Client") as M:
+        M.return_value.get.return_value = _ответ(text=xml)
+        доки, _ = cyberleninka.собрать(from_date="2024-01-01", бюджет=10)
+    assert len(доки) == 2  # химия и IT прошли, педагогика — нет
+    названия = {d.название for d in доки}
+    assert "Каталитический синтез наноматериалов" in названия
+    assert "Применение нейронных сетей в обработке данных" in названия
+    assert all("педагогических" not in d.название for d in доки)
+
+
+def test_cyberleninka_релевантно_по_subject():
+    """Если subject содержит scope-стем, документ пропускается даже с пустым title."""
+    assert cyberleninka._релевантно("Какая-то статья", ["химия", "катализ"])
+    assert cyberleninka._релевантно("Some unrelated title", ["computer science"])
+    assert not cyberleninka._релевантно("Подготовка учителей", ["педагогика"])
+    assert not cyberleninka._релевантно("Социология труда", [])
+
+
+def test_chemrxiv_handles_cloudflare_403(capsys):
+    """403 от Cloudflare должен мягко логироваться и не падать."""
+    from harvester.sources import chemrxiv
+    with patch("harvester.sources.chemrxiv.httpx.Client") as M:
+        ответ_cf = _ответ(text="<html>Just a moment...</html>", status=403)
+        ответ_cf.headers = {"content-type": "text/html; charset=UTF-8"}
+        M.return_value.get.return_value = ответ_cf
+        доки = list(chemrxiv.собрать(skip=0, бюджет=10))
+    assert доки == []
+    out = capsys.readouterr().out
+    assert "Cloudflare" in out
+
+
 def test_stackexchange_combines_q_and_answer():
     вопросы = _ответ(json_data={
         "items": [{
