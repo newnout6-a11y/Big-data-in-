@@ -20,8 +20,10 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -37,16 +39,66 @@ _БАЗА = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ВСЕ_ИСТОЧНИКИ = ["arxiv", "chemrxiv", "openalex", "europepmc", "cyberleninka", "stackexchange"]
 
 
-def _безопасное_имя(doc_id: str, url: str, *, расширение: str | None = None) -> str:
-    хэш = hashlib.sha1(doc_id.encode("utf-8")).hexdigest()[:16]
+_ТРАНСЛИТ = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def _слаг(текст: str, макс_длина: int = 80) -> str:
+    """Транслитерирует кириллицу, чистит до [a-z0-9-], обрезает по слову."""
+    if not текст:
+        return ""
+    т = текст.lower()
+    т = "".join(_ТРАНСЛИТ.get(с, с) for с in т)
+    т = unicodedata.normalize("NFKD", т)
+    т = т.encode("ascii", "ignore").decode("ascii")
+    т = re.sub(r"[^a-z0-9]+", "-", т).strip("-")
+    if len(т) > макс_длина:
+        обрез = т[:макс_длина]
+        # Не разрываем слово
+        if "-" in обрез:
+            обрез = обрез.rsplit("-", 1)[0]
+        т = обрез.strip("-")
+    return т
+
+
+def _безопасное_имя(
+    doc_id: str,
+    url: str = "",
+    *,
+    расширение: str | None = None,
+    заголовок: str | None = None,
+) -> str:
+    """`<slug>__<short-doc-id>.pdf` — читаемо и уникально.
+    Если заголовок пустой/нечитаемый — fallback на короткий хэш."""
+    очищ = re.sub(r"[^A-Za-z0-9._-]+", "-", doc_id or "").strip("-")
+    хэш12 = hashlib.sha1((doc_id or url).encode("utf-8")).hexdigest()[:12]
+    if not очищ:
+        короткий_doc = хэш12
+    elif len(очищ) > 40:
+        # url-style id: оставляем префикс источника + хэш для уникальности
+        префикс = очищ[:25].strip("-") or "id"
+        короткий_doc = f"{префикс}-{хэш12}"
+    else:
+        короткий_doc = очищ
+
     if расширение:
-        return хэш + расширение
-    суффикс = ".pdf"
-    if url and "." in url.rsplit("/", 1)[-1]:
-        кандидат = "." + url.rsplit(".", 1)[-1].split("?", 1)[0].lower()
-        if кандидат in (".pdf", ".docx"):
-            суффикс = кандидат
-    return хэш + суффикс
+        суффикс = расширение
+    else:
+        суффикс = ".pdf"
+        if url and "." in url.rsplit("/", 1)[-1]:
+            кандидат = "." + url.rsplit(".", 1)[-1].split("?", 1)[0].lower()
+            if кандидат in (".pdf", ".docx"):
+                суффикс = кандидат
+
+    слаг = _слаг(заголовок or "")
+    if слаг:
+        return f"{слаг}__{короткий_doc}{суффикс}"
+    return f"{короткий_doc}{суффикс}"
 
 
 def _сохранить_метадату(имя_файла, payload):
@@ -76,7 +128,7 @@ def обработать_документ(док, состояние, клиен
 
     # Stack Exchange и подобные синтетические — без pdf_url, текст в abstract
     if not док.pdf_url and док.abstract:
-        имя = _безопасное_имя(док.doc_id, "", расширение=".txt")
+        имя = _безопасное_имя(док.doc_id, "", расширение=".txt", заголовок=док.название)
         путь = os.path.join(ПАПКА_PDF, имя)
         os.makedirs(ПАПКА_PDF, exist_ok=True)
         with open(путь, "w", encoding="utf-8") as f:
@@ -99,7 +151,7 @@ def обработать_документ(док, состояние, клиен
     if not док.pdf_url:
         return False
 
-    имя = _безопасное_имя(док.doc_id, док.pdf_url)
+    имя = _безопасное_имя(док.doc_id, док.pdf_url, заголовок=док.название)
     путь = os.path.join(ПАПКА_PDF, имя)
     if os.path.exists(путь):
         state.пометить_скачанным(состояние, док.doc_id)
