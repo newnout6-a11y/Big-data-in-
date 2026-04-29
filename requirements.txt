@@ -2,6 +2,8 @@ streamlit
 sentence-transformers
 qdrant-client
 pypdf
+pymupdf
+fastembed
 python-docx
 reportlab
 groq

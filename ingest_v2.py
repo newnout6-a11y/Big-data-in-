@@ -21,7 +21,15 @@ import sys
 from datetime import datetime
 
 import docx
-import pypdf
+
+try:
+    import fitz  # PyMuPDF — быстрее и лучше с шрифтами/формулами
+    _ИСПОЛЬЗОВАТЬ_PYMUPDF = True
+except ImportError:
+    fitz = None
+    _ИСПОЛЬЗОВАТЬ_PYMUPDF = False
+
+import pypdf  # fallback и для не-PyMuPDF окружений
 
 from cases import определить_кейс
 from классификатор import (
@@ -42,7 +50,26 @@ _БАЗА = os.path.dirname(os.path.abspath(__file__))
 EMBED_MODEL_TAG = "e5-base-v1"
 
 
-def извлечь_pdf(путь):
+def _извлечь_pdf_pymupdf(путь):
+    страницы = []
+    try:
+        документ = fitz.open(путь)
+        try:
+            for номер, страница in enumerate(документ, start=1):
+                try:
+                    текст = страница.get_text("text") or ""
+                except Exception:
+                    continue
+                if текст and len(текст.strip()) > 50:
+                    страницы.append((номер, текст.strip()))
+        finally:
+            документ.close()
+    except Exception as ошибка:
+        print(f"  ОШИБКА PyMuPDF: {ошибка}")
+    return страницы
+
+
+def _извлечь_pdf_pypdf(путь):
     страницы = []
     try:
         читалка = pypdf.PdfReader(путь)
@@ -56,6 +83,16 @@ def извлечь_pdf(путь):
     except Exception as ошибка:
         print(f"  ОШИБКА pypdf: {ошибка}")
     return страницы
+
+
+def извлечь_pdf(путь):
+    """PyMuPDF когда доступен (5–10× быстрее, лучше с шрифтами), иначе pypdf."""
+    if _ИСПОЛЬЗОВАТЬ_PYMUPDF:
+        страницы = _извлечь_pdf_pymupdf(путь)
+        if страницы:
+            return страницы
+        # Если PyMuPDF ничего не извлёк (защищённый/повреждённый PDF), пробуем pypdf
+    return _извлечь_pdf_pypdf(путь)
 
 
 def извлечь_docx(путь):

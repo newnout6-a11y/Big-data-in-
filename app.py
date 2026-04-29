@@ -71,15 +71,23 @@ def загрузить_qdrant():
 
 @st.cache_resource
 def выбрать_коллекцию():
-    """Выбираем активную коллекцию: knowledge (новая схема) > химия (старая)."""
+    """Выбираем активную коллекцию: knowledge_hybrid (dense+sparse) >
+    knowledge (только dense) > химия (старая, dense + старая схема payload).
+
+    Возвращает (имя, новая_схема, гибрид):
+      - новая_схема=True если payload содержит domain/subdomain/...
+      - гибрид=True если можно делать sparse-prefetch + RRF
+    """
     клиент = загрузить_qdrant()
     try:
         имена = {к.name for к in клиент.get_collections().collections}
     except Exception:
         имена = set()
+    if "knowledge_hybrid" in имена:
+        return "knowledge_hybrid", True, True
     if "knowledge" in имена:
-        return "knowledge", True
-    return "химия", False
+        return "knowledge", True, False
+    return "химия", False, False
 
 
 @st.cache_resource
@@ -298,10 +306,11 @@ def найти_похожие(
     язык=None,
     источник=None,
     recency_weight=0.0,
+    использовать_reranker=False,
 ):
     модель = загрузить_модель()
     клиент = загрузить_qdrant()
-    коллекция, новая_схема = выбрать_коллекцию()
+    коллекция, новая_схема, гибрид = выбрать_коллекцию()
 
     вектор = модель.encode("query: " + вопрос, normalize_embeddings=True).tolist()
 
@@ -314,19 +323,50 @@ def найти_похожие(
     else:
         фильтр = _построить_фильтр(выбранный_кейс=выбранный_кейс)
 
-    ответ = клиент.query_points(
-        collection_name=коллекция,
-        query=вектор,
-        limit=количество * 3,
-        query_filter=фильтр,
-        with_payload=True,
-    )
+    лимит_кандидатов = количество * 5 if использовать_reranker else количество * 3
+
+    if гибрид:
+        from qdrant_client.models import (
+            Fusion,
+            FusionQuery,
+            Prefetch,
+            SparseVector,
+        )
+        from hybrid_search import построить_sparse_один
+
+        sparse_idx, sparse_val = построить_sparse_один(вопрос)
+        ответ = клиент.query_points(
+            collection_name=коллекция,
+            prefetch=[
+                Prefetch(query=вектор, using="dense", limit=лимит_кандидатов, filter=фильтр),
+                Prefetch(
+                    query=SparseVector(indices=sparse_idx, values=sparse_val),
+                    using="sparse", limit=лимит_кандидатов, filter=фильтр,
+                ),
+            ],
+            query=FusionQuery(fusion=Fusion.RRF),
+            limit=лимит_кандидатов,
+            with_payload=True,
+        )
+    else:
+        ответ = клиент.query_points(
+            collection_name=коллекция,
+            query=вектор,
+            limit=лимит_кандидатов,
+            query_filter=фильтр,
+            with_payload=True,
+        )
 
     for точка in ответ.points:
         точка.payload["text"] = почистить_pdf_артефакты(точка.payload.get("text", ""))
 
-    МИН_СХОДСТВО = 0.72
-    кандидаты = [т for т in ответ.points if т.score >= МИН_СХОДСТВО]
+    # При гибриде у точек RRF-score (~0.01–0.1) — порог по-другому. При dense — cosine ≥0.72.
+    if гибрид:
+        кандидаты = list(ответ.points)
+    else:
+        МИН_СХОДСТВО = 0.72
+        кандидаты = [т for т in ответ.points if т.score >= МИН_СХОДСТВО]
+
     кандидаты = [
         т for т in кандидаты
         if not похоже_на_библиографию(т.payload["text"])
@@ -338,6 +378,16 @@ def найти_похожие(
             бст = _recency_boost(т.payload.get("year"))
             т.score = float(т.score) * (1.0 + recency_weight * (бст - 1.0))
         кандидаты.sort(key=lambda т: т.score, reverse=True)
+
+    if использовать_reranker and кандидаты:
+        try:
+            from reranker import переранжировать
+            тексты = [т.payload.get("text", "") for т in кандидаты]
+            упорядоченные = переранжировать(вопрос, тексты, top_k=количество)
+            кандидаты = [кандидаты[i] for i, _ in упорядоченные]
+        except Exception as e:
+            # При ошибке (нет интернета/модели) — обычный порядок
+            print(f"reranker недоступен: {e}")
 
     return кандидаты[:количество]
 
@@ -613,7 +663,7 @@ with вкладка1:
         label_visibility="collapsed"
     )
 
-    _, новая_схема = выбрать_коллекцию()
+    _, новая_схема, _ = выбрать_коллекцию()
 
     к1, к2, к3, к4 = st.columns([2, 1.3, 1, 1.2], gap="small")
     with к1:
@@ -636,8 +686,9 @@ with вкладка1:
     выбор_года_от = None
     выбор_языка = "все"
     вес_свежести = 0.0
+    использовать_reranker = False
     if новая_схема:
-        with st.expander("Расширенные фильтры (домен, год, язык, свежесть)", expanded=False):
+        with st.expander("Расширенные фильтры (домен, год, язык, свежесть, reranker)", expanded=False):
             ф1, ф2, ф3, ф4, ф5 = st.columns([1.4, 1.4, 1, 1, 1.2], gap="small")
             with ф1:
                 варианты_доменов = ["все"] + list(ДОМЕНЫ.keys())
@@ -673,6 +724,11 @@ with вкладка1:
             with ф5:
                 вес_свежести = st.slider("Бонус свежести", 0.0, 1.0, 0.2, 0.05,
                                           help="Чем выше — тем сильнее свежие статьи буст в поиске")
+                использовать_reranker = st.checkbox(
+                    "Reranker (точнее, +1–2 сек)",
+                    value=False,
+                    help="Перепроверяет top-K cross-encoder'ом BAAI/bge-reranker-v2-m3 (~600 МБ, скачивается один раз).",
+                )
 
     дизайн.показать_заголовок("Примеры вопросов", отступ_сверху_rem=2.5)
     примеры = [
@@ -724,6 +780,7 @@ with вкладка1:
                         год_от=выбор_года_от,
                         язык=выбор_языка,
                         recency_weight=вес_свежести,
+                        использовать_reranker=использовать_reranker,
                     )
                 if not точки:
                     st.session_state.результаты_поиска = None

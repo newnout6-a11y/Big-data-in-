@@ -1,8 +1,11 @@
 """Инкрементальная векторизация чанков из chunks_v2.jsonl в Qdrant.
 
-Создаёт коллекцию `knowledge` (новая схема). Старая `химия` не трогается.
-Если коллекции нет — создаёт. Если есть — догружает остаток.
-Также создаёт payload-индексы для быстрых фильтров.
+Создаёт коллекцию `knowledge_hybrid` с named-vectors:
+  - dense  — multilingual-e5-base, 768d, cosine
+  - sparse — BM25 с серверным IDF (через FastEmbed Qdrant/bm25)
+
+Старые коллекции (`химия`, `knowledge`) не трогаются — приложение умеет
+работать как с гибридной, так и с устаревшими.
 """
 from __future__ import annotations
 
@@ -13,20 +16,23 @@ import sys
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
-    FieldCondition,
-    Filter,
-    MatchValue,
+    Modifier,
     PayloadSchemaType,
     PointStruct,
+    SparseIndexParams,
+    SparseVector,
+    SparseVectorParams,
     VectorParams,
 )
 from sentence_transformers import SentenceTransformer
+
+from hybrid_search import построить_sparse_батч
 
 
 _БАЗА = os.path.dirname(os.path.abspath(__file__))
 ФАЙЛ_ЧАНКОВ = os.path.join(_БАЗА, "chunks_v2.jsonl")
 ПАПКА_БД = os.path.join(_БАЗА, "qdrant_db")
-КОЛЛЕКЦИЯ = "knowledge"
+КОЛЛЕКЦИЯ = "knowledge_hybrid"
 РАЗМЕР_БАТЧА = 64
 РАЗМЕР_ВЕКТОРА = 768
 
@@ -42,10 +48,7 @@ _БАЗА = os.path.dirname(os.path.abspath(__file__))
 
 
 def подключиться():
-    """Подключается к Qdrant. Если есть QDRANT_URL/QDRANT_API_KEY — на сервер,
-    иначе локально в qdrant_db/. Это позволяет запускать на GitHub Actions
-    с пушем в Qdrant Cloud, и локально для разработки.
-    """
+    """Удалённый Qdrant если задан QDRANT_URL, иначе локальный qdrant_db/."""
     url = os.getenv("QDRANT_URL", "").strip()
     if url:
         клиент = QdrantClient(
@@ -62,9 +65,17 @@ def подключиться():
     if КОЛЛЕКЦИЯ not in коллекции:
         клиент.create_collection(
             collection_name=КОЛЛЕКЦИЯ,
-            vectors_config=VectorParams(size=РАЗМЕР_ВЕКТОРА, distance=Distance.COSINE),
+            vectors_config={
+                "dense": VectorParams(size=РАЗМЕР_ВЕКТОРА, distance=Distance.COSINE),
+            },
+            sparse_vectors_config={
+                "sparse": SparseVectorParams(
+                    index=SparseIndexParams(on_disk=False),
+                    modifier=Modifier.IDF,
+                ),
+            },
         )
-        print(f"Создана коллекция {КОЛЛЕКЦИЯ}")
+        print(f"Создана гибридная коллекция {КОЛЛЕКЦИЯ}")
     for поле, тип in ПОЛЯ_ИНДЕКСОВ:
         try:
             клиент.create_payload_index(КОЛЛЕКЦИЯ, поле, тип)
@@ -96,21 +107,29 @@ def main():
         return 0
 
     модель = SentenceTransformer("intfloat/multilingual-e5-base")
-    print("Модель загружена")
+    print("Модель dense загружена")
 
     текущий = в_базе
     for старт in range(0, len(осталось), РАЗМЕР_БАТЧА):
         батч = осталось[старт:старт + РАЗМЕР_БАТЧА]
-        тексты = ["passage: " + ч["text"] for ч in батч]
-        векторы = модель.encode(тексты, show_progress_bar=False, normalize_embeddings=True)
+        тексты = [ч["text"] for ч in батч]
+        векторы = модель.encode(
+            ["passage: " + т for т in тексты],
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+        sparse_пары = построить_sparse_батч(тексты)
 
         точки = []
         for i, чанк in enumerate(батч):
-            payload = {ключ: значение for ключ, значение in чанк.items() if ключ != "text" or True}
+            idx, val = sparse_пары[i]
             точки.append(PointStruct(
                 id=текущий,
-                vector=векторы[i].tolist(),
-                payload=payload,
+                vector={
+                    "dense": векторы[i].tolist(),
+                    "sparse": SparseVector(indices=idx, values=val),
+                },
+                payload=чанк,
             ))
             текущий += 1
 
