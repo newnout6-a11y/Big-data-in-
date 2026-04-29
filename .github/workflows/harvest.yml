@@ -1,0 +1,90 @@
+name: harvest
+
+# Cron-харвестер: каждые 6 часов забирает свежие документы из arXiv, OpenAlex,
+# Europe PMC, Stack Exchange (и опционально chemRxiv/КиберЛенинка), ингестит
+# их и пушит чанки в удалённый Qdrant. Прогресс (cursor'ы и downloaded_ids)
+# коммитится обратно в репо, чтобы следующий прогон стартовал с того же места.
+#
+# Требуемые секреты в репозитории (Settings → Secrets and variables → Actions):
+#   QDRANT_URL       — URL Qdrant Cloud (обязательно)
+#   QDRANT_API_KEY   — ключ Qdrant Cloud (обязательно)
+#   HARVESTER_EMAIL  — email для User-Agent OpenAlex (обязательно)
+#   GROQ_API_KEY     — для Streamlit-приложения (не используется в этом cron'е,
+#                      но обычно уже есть в репо)
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: "Сколько документов за прогон (всего)"
+        default: "300"
+      sources:
+        description: "Источники через запятую"
+        default: "arxiv,openalex,europepmc,stackexchange"
+      year_min:
+        description: "Минимальный год публикации"
+        default: "2020"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: harvest
+  cancel-in-progress: false
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run harvest → ingest → embed
+        env:
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          HARVESTER_EMAIL: ${{ secrets.HARVESTER_EMAIL }}
+        run: |
+          python -m harvester.harvest_full \
+            --budget "${{ github.event.inputs.budget || '300' }}" \
+            --year-min "${{ github.event.inputs.year_min || '2020' }}" \
+            --sources "${{ github.event.inputs.sources || 'arxiv,openalex,europepmc,stackexchange' }}" \
+            --time-limit-min 300
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harvest-${{ github.run_id }}
+          path: |
+            harvester/logs/
+            harvester/state.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Commit state.json + logs back
+        if: always()
+        run: |
+          git config user.name  "harvester-bot"
+          git config user.email "harvester-bot@users.noreply.github.com"
+          git add harvester/state.json harvester/logs/ || true
+          if ! git diff --cached --quiet; then
+            git commit -m "harvest: incremental update [skip ci]"
+            git push
+          else
+            echo "Нет изменений в state."
+          fi

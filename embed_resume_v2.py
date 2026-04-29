@@ -42,7 +42,22 @@ _БАЗА = os.path.dirname(os.path.abspath(__file__))
 
 
 def подключиться():
-    клиент = QdrantClient(path=ПАПКА_БД)
+    """Подключается к Qdrant. Если есть QDRANT_URL/QDRANT_API_KEY — на сервер,
+    иначе локально в qdrant_db/. Это позволяет запускать на GitHub Actions
+    с пушем в Qdrant Cloud, и локально для разработки.
+    """
+    url = os.getenv("QDRANT_URL", "").strip()
+    if url:
+        клиент = QdrantClient(
+            url=url,
+            api_key=os.getenv("QDRANT_API_KEY") or None,
+            prefer_grpc=False,
+            timeout=120,
+        )
+        print(f"Qdrant: удалённый сервер {url}")
+    else:
+        клиент = QdrantClient(path=ПАПКА_БД)
+        print(f"Qdrant: локальный {ПАПКА_БД}")
     коллекции = {к.name for к in клиент.get_collections().collections}
     if КОЛЛЕКЦИЯ not in коллекции:
         клиент.create_collection(

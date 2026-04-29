@@ -14,11 +14,14 @@ _замок = threading.Lock()
 
 def _значения_по_умолчанию():
     return {
-        "version": 1,
+        "version": 2,
         "sources": {
             "arxiv": {"last_index": 0, "last_run": None},
             "chemrxiv": {"skip": 0, "last_run": None},
             "openalex": {"cursors": {}, "last_run": None},
+            "europepmc": {"cursors": {}, "last_run": None},
+            "cyberleninka": {"current_date": "2020-01-01", "last_run": None},
+            "stackexchange": {"sites": {}, "last_run": None},
         },
         "downloaded_ids": [],
     }

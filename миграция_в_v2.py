@@ -43,8 +43,19 @@ EMBED_MODEL_TAG = "e5-base-v1"
 ]
 
 
+def _подключиться():
+    url = os.getenv("QDRANT_URL", "").strip()
+    if url:
+        return QdrantClient(
+            url=url,
+            api_key=os.getenv("QDRANT_API_KEY") or None,
+            timeout=120,
+        )
+    return QdrantClient(path=ПАПКА_БД)
+
+
 def main():
-    клиент = QdrantClient(path=ПАПКА_БД)
+    клиент = _подключиться()
     коллекции = {к.name for к in клиент.get_collections().collections}
     if СТАРАЯ_КОЛЛЕКЦИЯ not in коллекции:
         print(f"Не найдена коллекция {СТАРАЯ_КОЛЛЕКЦИЯ}. Нечего мигрировать.")

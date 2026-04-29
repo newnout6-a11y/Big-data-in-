@@ -56,6 +56,15 @@ def загрузить_модель():
 
 @st.cache_resource
 def загрузить_qdrant():
+    """Удалённый Qdrant если задан QDRANT_URL, иначе локальный qdrant_db/."""
+    url = os.getenv("QDRANT_URL", "").strip()
+    if url:
+        return QdrantClient(
+            url=url,
+            api_key=os.getenv("QDRANT_API_KEY") or None,
+            prefer_grpc=False,
+            timeout=60,
+        )
     папка = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qdrant_db")
     return QdrantClient(path=папка)
 
