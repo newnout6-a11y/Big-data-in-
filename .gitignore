@@ -16,9 +16,11 @@ all_pdfs/
 # Метаданные harvester (генерируются автосбором)
 harvested_meta/
 
-# Состояние и логи harvester
-harvester/state.json
-harvester/logs/
+# Логи harvester (raw, могут расти)
+harvester/logs/harvest.log
+# Состояние и JSON-отчёты прогонов коммитим (маленькие, нужны для cron)
+# harvester/state.json — отслеживается
+# harvester/logs/run_*.json — отслеживается
 
 # Кэш эмбеддингов прототипов (быстро восстанавливается)
 prototype_cache.npz

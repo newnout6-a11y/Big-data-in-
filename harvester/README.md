@@ -1,36 +1,44 @@
 # Harvester — автосбор корпуса
 
-Скачивает свежие PDF из открытых источников по теме «химия + IT»:
+Скачивает свежие PDF/тексты из открытых источников по теме «химия + IT + смежное».
 
-- **arXiv** — категории `cs.LG, cs.AI, cs.CL, stat.ML, physics.chem-ph, cond-mat.mtrl-sci, q-bio.BM, q-bio.QM`
-- **chemRxiv** — все препринты
-- **OpenAlex** — concepts: Cheminformatics, Machine learning, Chemistry, Materials science, Computer science (нужен email в User-Agent)
+## Источники
 
-## Запуск
+| Модуль | Что | Особенности |
+|---|---|---|
+| `sources/arxiv.py` | cs.LG, cs.AI, stat.ML, physics.chem-ph, cond-mat.mtrl-sci, q-bio.BM | Atom API, ≥3 сек между запросами |
+| `sources/chemrxiv.py` | Все препринты с PDF | JSON API; CF может блокировать с CI-IP |
+| `sources/openalex.py` | Cheminformatics, ML, Chemistry, Materials, CS | REST с курсором; нужен email в User-Agent |
+| `sources/europepmc.py` | OA full-text по 8 ключевым запросам | REST, стабильный курсорный пейджинг |
+| `sources/cyberleninka.py` | RU OAI-PMH (по дате) | Метаданные стабильны, PDF — CDN, может блокироваться |
+| `sources/stackexchange.py` | Q+top answer (chemistry, ai, datascience, cs) | Без ключа: 10 000 запросов/день |
+
+## Запуск локально
 
 ```bash
-pip install -r harvester/requirements.txt
+pip install -r requirements.txt
 python -m harvester.run --budget 300 --year-min 2020 --email you@example.com
 ```
 
-PDF попадают в `all_pdfs/`, метаданные — в `harvested_meta/`. Состояние (курсоры по
-источникам, скачанные ID) — в `harvester/state.json`. Прогрессивно докачивается при каждом запуске.
-
-После прогона:
+Или сразу полный пайплайн (harvest → ingest → embed):
 
 ```bash
-python ingest_доп.py    # дочанкует только новые файлы
-python embed_resume.py  # инкрементально докинет векторы
+python -m harvester.harvest_full --budget 300 --email you@example.com
 ```
 
-## GitHub Actions (бесконечный режим)
+PDF/.txt попадают в `all_pdfs/`, метаданные — в `harvested_meta/`. Состояние
+(курсоры, скачанные `doc_id`) — в `harvester/state.json`.
 
-См. `.github/workflows/harvest.yml` (PR #2). Раз в 3 часа поднимается раннер,
-запускает `harvester.run` с бюджетом, коммитит обновлённый `state.json` и
-загружает векторы в Qdrant Cloud / VPS.
+## Бесконечный режим — GitHub Actions
+
+См. `.github/workflows/harvest.yml`. Каждые 6 часов раннер собирает свежие
+документы, ингестит, векторизует и пушит чанки в Qdrant Cloud (по env-var
+`QDRANT_URL` + `QDRANT_API_KEY`). `state.json` коммитится обратно в репо.
+
+Полный гайд по настройке — `документация/CRON_HARVESTER.md`.
 
 ## Этика
 
-Используются ТОЛЬКО открытые легальные API. Никаких Sci-Hub / LibGen / зеркал
-платных журналов. OpenAlex / arXiv / chemRxiv требуют только User-Agent с
-email и щадящий rate-limit (≤2 req/s) — никаких прокси и обходов не нужно.
+Используются ТОЛЬКО открытые легальные API. Никаких Sci-Hub / LibGen /
+зеркал платных журналов. Все источники требуют только щадящий rate-limit и
+User-Agent с email — никаких прокси/обходов.

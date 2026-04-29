@@ -88,6 +88,29 @@ def извлечь_docx(путь):
     return страницы
 
 
+def извлечь_txt(путь):
+    """Простой текстовый файл (например, Stack Exchange Q+A)."""
+    try:
+        with open(путь, "r", encoding="utf-8", errors="ignore") as f:
+            полный = f.read().strip()
+    except Exception as ошибка:
+        print(f"  ОШИБКА txt: {ошибка}")
+        return []
+    if len(полный) < 50:
+        return []
+    страницы = []
+    номер = 1
+    начало = 0
+    while начало < len(полный):
+        конец = начало + СИМВ_НА_СТРАНИЦУ_DOCX
+        кусок = полный[начало:конец].strip()
+        if len(кусок) > 50:
+            страницы.append((номер, кусок))
+        начало = конец
+        номер += 1
+    return страницы
+
+
 def разбить_на_чанки(текст, размер=РАЗМЕР_ЧАНКА, перекр=ПЕРЕКРЫТИЕ):
     чанки = []
     начало = 0
@@ -144,7 +167,7 @@ def main(argv=None):
 
     все_файлы = sorted([
         ф for ф in os.listdir(ПАПКА_PDF)
-        if ф.lower().endswith((".pdf", ".docx"))
+        if ф.lower().endswith((".pdf", ".docx", ".txt"))
     ])
     новые = [ф for ф in все_файлы if ф not in обработанные]
     print(f"Всего файлов: {len(все_файлы)}, новых: {len(новые)}")
@@ -165,10 +188,13 @@ def main(argv=None):
     with open(ФАЙЛ_ЧАНКОВ, режим, encoding="utf-8") as выход:
         for индекс, имя in enumerate(новые, start=1):
             путь = os.path.join(ПАПКА_PDF, имя)
-            if имя.lower().endswith(".pdf"):
+            нижний = имя.lower()
+            if нижний.endswith(".pdf"):
                 страницы = извлечь_pdf(путь)
-            else:
+            elif нижний.endswith(".docx"):
                 страницы = извлечь_docx(путь)
+            else:
+                страницы = извлечь_txt(путь)
             if not страницы:
                 print(f"  [{индекс}/{len(новые)}] ПРОПУЩЕН (нет текста): {имя}")
                 continue
