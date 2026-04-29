@@ -29,16 +29,21 @@ if not defined PY (
 )
 if not defined PY (
   for %%P in (
+    "%LOCALAPPDATA%\Programs\Python\Python314\python.exe"
     "%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
     "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
     "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
     "%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
+    "%LOCALAPPDATA%\Python\pythoncore-3.14-64\python.exe"
+    "%LOCALAPPDATA%\Python\pythoncore-3.13-64\python.exe"
+    "%LOCALAPPDATA%\Python\pythoncore-3.12-64\python.exe"
+    "C:\Python314\python.exe"
     "C:\Python313\python.exe"
     "C:\Python312\python.exe"
     "C:\Python311\python.exe"
     "C:\Python310\python.exe"
   ) do (
-    if exist %%P set "PY=%%~P"
+    if not defined PY if exist %%P set "PY=%%~P"
   )
 )
 if not defined PY (
