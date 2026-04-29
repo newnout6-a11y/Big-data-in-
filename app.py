@@ -1,16 +1,26 @@
+import math
 import os
 import re
 import json
+from datetime import datetime
+
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue
+from qdrant_client.models import Filter, FieldCondition, MatchValue, Range
 from groq import Groq
 from dotenv import load_dotenv
 
 import дизайн
 from cases import кейсы, получить_название_кейса
 from fallback_answers import заготовленные_ответы
+from taxonomy import ДОМЕНЫ, название_домена, название_субдомена
+from классификатор import (
+    подготовить_прототипы,
+    проверить_scope,
+    примеры_in_scope_вопросов,
+    SCOPE_ПОРОГ_ПО_УМОЛЧАНИЮ,
+)
 
 load_dotenv()
 
@@ -48,6 +58,25 @@ def загрузить_модель():
 def загрузить_qdrant():
     папка = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qdrant_db")
     return QdrantClient(path=папка)
+
+
+@st.cache_resource
+def выбрать_коллекцию():
+    """Выбираем активную коллекцию: knowledge (новая схема) > химия (старая)."""
+    клиент = загрузить_qdrant()
+    try:
+        имена = {к.name for к in клиент.get_collections().collections}
+    except Exception:
+        имена = set()
+    if "knowledge" in имена:
+        return "knowledge", True
+    return "химия", False
+
+
+@st.cache_resource
+def прототипы_доменов():
+    модель = загрузить_модель()
+    return подготовить_прототипы(модель)
 
 
 def похоже_на_библиографию(текст):
@@ -224,40 +253,84 @@ def вставить_цитаты_в_ответ(текст, фрагменты):
     return re.sub(r"\[(\d+)\]", замена, безопасный)
 
 
-def найти_похожие(вопрос, выбранный_кейс, количество):
+def _построить_фильтр(выбранный_кейс, домен=None, субдомен=None, год_от=None, язык=None, источник=None):
+    must = []
+    if выбранный_кейс and выбранный_кейс != "все":
+        must.append(FieldCondition(key="case", match=MatchValue(value=выбранный_кейс)))
+    if домен and домен != "все":
+        must.append(FieldCondition(key="domain", match=MatchValue(value=домен)))
+    if субдомен and субдомен != "все":
+        must.append(FieldCondition(key="subdomain", match=MatchValue(value=субдомен)))
+    if язык and язык != "все":
+        must.append(FieldCondition(key="language", match=MatchValue(value=язык)))
+    if источник and источник != "все":
+        must.append(FieldCondition(key="source", match=MatchValue(value=источник)))
+    if год_от:
+        must.append(FieldCondition(key="year", range=Range(gte=год_от)))
+    return Filter(must=must) if must else None
+
+
+def _recency_boost(год, λ=0.0667):
+    """Множитель свежести: статья этого года → 1.0, на 5 лет старше → ~0.72."""
+    if not год:
+        return 1.0
+    разница = max(0, datetime.utcnow().year - int(год))
+    return math.exp(-λ * разница)
+
+
+def найти_похожие(
+    вопрос,
+    выбранный_кейс,
+    количество,
+    *,
+    домен=None,
+    субдомен=None,
+    год_от=None,
+    язык=None,
+    источник=None,
+    recency_weight=0.0,
+):
     модель = загрузить_модель()
     клиент = загрузить_qdrant()
+    коллекция, новая_схема = выбрать_коллекцию()
+
     вектор = модель.encode("query: " + вопрос, normalize_embeddings=True).tolist()
 
-    если_фильтр = None
-    if выбранный_кейс != "все":
-        если_фильтр = Filter(
-            must=[FieldCondition(key="case", match=MatchValue(value=выбранный_кейс))]
+    if новая_схема:
+        фильтр = _построить_фильтр(
+            выбранный_кейс=None,  # case в новой схеме менее приоритетен
+            домен=домен, субдомен=субдомен,
+            год_от=год_от, язык=язык, источник=источник,
         )
+    else:
+        фильтр = _построить_фильтр(выбранный_кейс=выбранный_кейс)
 
     ответ = клиент.query_points(
-        collection_name="химия",
+        collection_name=коллекция,
         query=вектор,
         limit=количество * 3,
-        query_filter=если_фильтр,
-        with_payload=True
+        query_filter=фильтр,
+        with_payload=True,
     )
-
 
     for точка in ответ.points:
         точка.payload["text"] = почистить_pdf_артефакты(точка.payload.get("text", ""))
 
-
     МИН_СХОДСТВО = 0.72
-    релевантные = [т for т in ответ.points if т.score >= МИН_СХОДСТВО]
-
-    содержательные = [
-        точка for точка in релевантные
-        if not похоже_на_библиографию(точка.payload["text"])
-        and not похоже_на_мусор(точка.payload["text"])
+    кандидаты = [т for т in ответ.points if т.score >= МИН_СХОДСТВО]
+    кандидаты = [
+        т for т in кандидаты
+        if not похоже_на_библиографию(т.payload["text"])
+        and not похоже_на_мусор(т.payload["text"])
     ]
 
-    return содержательные[:количество]
+    if recency_weight > 0:
+        for т in кандидаты:
+            бст = _recency_boost(т.payload.get("year"))
+            т.score = float(т.score) * (1.0 + recency_weight * (бст - 1.0))
+        кандидаты.sort(key=lambda т: т.score, reverse=True)
+
+    return кандидаты[:количество]
 
 
 def _ключи_groq():
@@ -531,6 +604,8 @@ with вкладка1:
         label_visibility="collapsed"
     )
 
+    _, новая_схема = выбрать_коллекцию()
+
     к1, к2, к3, к4 = st.columns([2, 1.3, 1, 1.2], gap="small")
     with к1:
         выбор_кейса = st.selectbox(
@@ -546,6 +621,49 @@ with вкладка1:
     with к4:
         дизайн.показать_вертикальный_отступ()
         кнопка = st.button("Найти ответ", type="primary", use_container_width=True)
+
+    выбор_домена = "все"
+    выбор_субдомена = "все"
+    выбор_года_от = None
+    выбор_языка = "все"
+    вес_свежести = 0.0
+    if новая_схема:
+        with st.expander("Расширенные фильтры (домен, год, язык, свежесть)", expanded=False):
+            ф1, ф2, ф3, ф4, ф5 = st.columns([1.4, 1.4, 1, 1, 1.2], gap="small")
+            with ф1:
+                варианты_доменов = ["все"] + list(ДОМЕНЫ.keys())
+                выбор_домена = st.selectbox(
+                    "Область",
+                    options=варианты_доменов,
+                    format_func=lambda к: "Все области" if к == "все" else название_домена(к),
+                )
+            with ф2:
+                if выбор_домена != "все":
+                    варианты_суб = ["все"] + list(ДОМЕНЫ[выбор_домена]["subdomains"].keys())
+                else:
+                    варианты_суб = ["все"]
+                выбор_субдомена = st.selectbox(
+                    "Подобласть",
+                    options=варианты_суб,
+                    format_func=lambda к: (
+                        "Все" if к == "все" else название_субдомена(выбор_домена, к)
+                    ),
+                    disabled=(выбор_домена == "все"),
+                )
+            with ф3:
+                выбор_года_от = st.number_input(
+                    "Не раньше",
+                    min_value=1990, max_value=datetime.utcnow().year,
+                    value=2018, step=1,
+                )
+            with ф4:
+                выбор_языка = st.selectbox(
+                    "Язык",
+                    options=["все", "ru", "en", "mixed"],
+                )
+            with ф5:
+                вес_свежести = st.slider("Бонус свежести", 0.0, 1.0, 0.2, 0.05,
+                                          help="Чем выше — тем сильнее свежие статьи буст в поиске")
 
     дизайн.показать_заголовок("Примеры вопросов", отступ_сверху_rem=2.5)
     примеры = [
@@ -572,8 +690,32 @@ with вкладка1:
             st.session_state.результаты_поиска = {"тип": "демо", "данные": демо}
         else:
             try:
+                if новая_схема:
+                    модель_e5 = загрузить_модель()
+                    метки_p, прото_p, негативы_p = прототипы_доменов()
+                    in_scope, авто_дом, авто_суб, скор_scope = проверить_scope(
+                        вопрос_пользователя, модель_e5,
+                        метки_p, прото_p, негативы_p,
+                    )
+                    if not in_scope:
+                        st.session_state.результаты_поиска = {
+                            "тип": "off_topic",
+                            "scope_score": скор_scope,
+                            "примеры": примеры_in_scope_вопросов(),
+                        }
+                        st.stop()
+
                 with st.spinner("Векторный поиск в Qdrant..."):
-                    точки = найти_похожие(вопрос_пользователя, выбор_кейса, количество_фрагментов)
+                    точки = найти_похожие(
+                        вопрос_пользователя,
+                        выбор_кейса,
+                        количество_фрагментов,
+                        домен=выбор_домена,
+                        субдомен=выбор_субдомена,
+                        год_от=выбор_года_от,
+                        язык=выбор_языка,
+                        recency_weight=вес_свежести,
+                    )
                 if not точки:
                     st.session_state.результаты_поиска = None
                     st.warning("Ничего не найдено. Попробуйте изменить вопрос или кейс.")
@@ -585,11 +727,17 @@ with вкладка1:
                         "ответ": ответ,
                         "фрагменты": [
                             {
-                                "document": т.payload["document"],
-                                "page": т.payload["page"],
-                                "case": т.payload["case"],
-                                "text": т.payload["text"],
+                                "document": т.payload.get("document", ""),
+                                "page": т.payload.get("page", ""),
+                                "case": т.payload.get("case", ""),
+                                "text": т.payload.get("text", ""),
                                 "score": float(т.score),
+                                "domain": т.payload.get("domain"),
+                                "subdomain": т.payload.get("subdomain"),
+                                "year": т.payload.get("year"),
+                                "source": т.payload.get("source"),
+                                "title": т.payload.get("title"),
+                                "language": т.payload.get("language"),
                             }
                             for т in точки
                         ],
@@ -602,7 +750,17 @@ with вкладка1:
         st.warning("Поле вопроса пустое.")
 
     результат = st.session_state.результаты_поиска
-    if результат and результат["тип"] == "демо":
+    if результат and результат.get("тип") == "off_topic":
+        st.warning(
+            "Этот вопрос вне области моей базы знаний. "
+            "Я отвечаю по химии, IT и их пересечению (cheminformatics, ML для химии, "
+            "computational chemistry, materials informatics и т. п.)."
+        )
+        st.caption(f"scope-score: {результат['scope_score']:.3f} (порог {SCOPE_ПОРОГ_ПО_УМОЛЧАНИЮ:.2f})")
+        st.markdown("**Примеры вопросов, на которые я отвечу:**")
+        for пр in результат["примеры"]:
+            st.markdown(f"- {пр}")
+    elif результат and результат["тип"] == "демо":
         демо = результат["данные"]
         дизайн.показать_мета_демо(демо.get("кейс", ""))
         st.markdown(демо["ответ"])
@@ -641,7 +799,20 @@ with вкладка1:
         for i, фр in enumerate(фрагменты, 1):
             заголовок = f"{i:02d}   {фр['document']}   ·   стр. {фр['page']}   ·   score {фр['score']:.3f}"
             with st.expander(заголовок):
-                st.markdown(f"**Кейс:** {получить_название_кейса(фр['case'])}")
+                метки = []
+                if фр.get("domain"):
+                    дом = фр["domain"]
+                    метки.append(название_домена(дом))
+                    if фр.get("subdomain"):
+                        метки.append(название_субдомена(дом, фр["subdomain"]))
+                if фр.get("year"):
+                    метки.append(str(фр["year"]))
+                if фр.get("source"):
+                    метки.append(фр["source"])
+                if метки:
+                    st.markdown("**Метки:** " + " · ".join(метки))
+                if фр.get("case"):
+                    st.markdown(f"**Кейс:** {получить_название_кейса(фр['case'])}")
                 чистый = почистить_pdf_текст(фр["text"])
 
                 with st.spinner("Поиск формул..."):

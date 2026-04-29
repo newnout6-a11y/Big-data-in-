@@ -6,11 +6,22 @@
 # Векторная БД (большая, регенерируется через embed_resume.py)
 qdrant_db/
 
-# Выход из ingest.py (40+ МБ, генерируется)
+# Выход из ingest.py / ingest_v2.py (40+ МБ, генерируется)
 chunks.jsonl
+chunks_v2.jsonl
 
 # Сырые PDF (сотни МБ, не в репо)
 all_pdfs/
+
+# Метаданные harvester (генерируются автосбором)
+harvested_meta/
+
+# Состояние и логи harvester
+harvester/state.json
+harvester/logs/
+
+# Кэш эмбеддингов прототипов (быстро восстанавливается)
+prototype_cache.npz
 
 # Кэш Python
 __pycache__/
