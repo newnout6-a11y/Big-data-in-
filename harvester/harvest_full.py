@@ -85,8 +85,8 @@ def main(argv=None):
         код3, дл3 = _запустить(команда_embed, окруж)
         отчёт["steps"]["embed"] = {"return_code": код3, "seconds": round(дл3, 1)}
 
-    # Шаг 4 — S3 upload (опционально, только если заданы креды)
-    if os.getenv("S3_BUCKET"):
+    # Шаг 4 — S3 upload (опционально, только если заданы креды и есть время)
+    if os.getenv("S3_BUCKET") and time.time() < дедлайн:
         команда_s3 = [sys.executable, "-m", "harvester.s3_upload"]
         код4, дл4 = _запустить(команда_s3, окруж)
         отчёт["steps"]["s3_upload"] = {"return_code": код4, "seconds": round(дл4, 1)}
