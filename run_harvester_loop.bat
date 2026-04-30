@@ -60,7 +60,7 @@ if not defined PY (
 
 REM ----- Параметры по умолчанию -----
 if "%HARVESTER_BUDGET%"=="" set "HARVESTER_BUDGET=2000"
-if "%HARVESTER_SOURCES%"=="" set "HARVESTER_SOURCES=arxiv,chemrxiv,openalex,europepmc,cyberleninka,stackexchange"
+if "%HARVESTER_SOURCES%"=="" set "HARVESTER_SOURCES=arxiv,chemrxiv,openalex,europepmc,cyberleninka,stackexchange,semanticscholar"
 if "%HARVESTER_YEAR_MIN%"=="" set "HARVESTER_YEAR_MIN=2020"
 if "%HARVESTER_EMAIL%"=="" set "HARVESTER_EMAIL=you@example.com"
 

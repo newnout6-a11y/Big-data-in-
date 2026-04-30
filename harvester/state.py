@@ -20,7 +20,7 @@ _замок = threading.Lock()
 
 def _значения_по_умолчанию():
     return {
-        "version": 3,
+        "version": 4,
         "sources": {
             "arxiv": {"last_index": 0, "last_run": None},
             "chemrxiv": {"skip": 0, "last_run": None},
@@ -31,6 +31,8 @@ def _значения_по_умолчанию():
         },
         "downloaded_ids": [],
         "normalized_ids": [],
+        # v4: учёт доменов для балансировки (chem/it/other)
+        "domain_counts": {"chem": 0, "it": 0, "other": 0},
     }
 
 
@@ -68,10 +70,12 @@ def нормализовать_doc_id(doc_id: str) -> str:
         if префикс.lower() in {"arxiv", "openalex", "europepmc", "chemrxiv", "cyberleninka", "doi"}:
             тело = остаток.strip()
 
-    # 1. arxiv-алиас в виде DOI: 10.48550/arXiv.2304.12345
-    m = re.search(r"10\.48550/arxiv\.([^\s/v]+)", тело, re.IGNORECASE)
+    # 1. arxiv-алиас в виде DOI: 10.48550/arXiv.2304.12345 или 10.48550/arXiv.cs.CV/0601001
+    # Важно: не исключаем '/' и 'v' из character class — они могут быть частью
+    # старых arxiv-идентификаторов (cs.CV/0601001). Версию снимаем регексом в конце.
+    m = re.search(r"10\.48550/arxiv\.([^\s]+)", тело, re.IGNORECASE)
     if m:
-        base = m.group(1).split("v")[0].rstrip(".")
+        base = re.sub(r"v\d+$", "", m.group(1), flags=re.IGNORECASE).rstrip(".")
         return f"arxiv:{base.lower()}"
 
     # 2. arxiv-id нового формата: 2304.12345(v2)
@@ -117,6 +121,11 @@ def прочитать():
             if норм and норм not in данные["normalized_ids"]:
                 данные["normalized_ids"].append(норм)
         данные["version"] = 3
+    # Миграция v3 → v4: добавить пустые domain_counts (без ретро-классификации,
+    # она требует title/abstract которых нет в state.json — стартуем с нуля).
+    if "domain_counts" not in данные:
+        данные["domain_counts"] = {"chem": 0, "it": 0, "other": 0}
+        данные["version"] = 4
     return данные
 
 
