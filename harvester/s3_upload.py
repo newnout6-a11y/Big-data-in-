@@ -52,6 +52,13 @@ def _получить_клиент():
               "S3_ACCESS_KEY, S3_SECRET_KEY) — пропускаю загрузку", flush=True)
         return None, None
 
+    # Подсказка для Cloud.ru Evolution: у них ключ формата tenant_id:key_id.
+    # Предупреждаем если похоже на UUID без двоеточия — чаще всего это ошибка.
+    if "cloud.ru" in endpoint and ":" not in access_key:
+        print("[s3] ВНИМАНИЕ: для Cloud.ru Evolution S3_ACCESS_KEY должен быть "
+              "в формате <tenant_id>:<key_id> через двоеточие. Сейчас тенант не "
+              "задан — скорее всего получишь InvalidAccessKeyId.", flush=True)
+
     try:
         import boto3  # type: ignore
         from botocore.config import Config  # type: ignore
