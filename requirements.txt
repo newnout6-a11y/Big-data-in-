@@ -10,3 +10,4 @@ groq
 python-dotenv
 numpy
 httpx>=0.27
+boto3>=1.34
