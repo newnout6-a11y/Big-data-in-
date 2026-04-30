@@ -82,20 +82,6 @@ def _запустить_итерацию(args, work_min: int) -> int:
         return 1
 
 
-def _залить_в_s3() -> int:
-    """Опциональный шаг: залить новые файлы в S3, если задан S3_BUCKET."""
-    if not os.getenv("S3_BUCKET"):
-        return 0
-    команда = [sys.executable, "-m", "harvester.s3_upload"]
-    print(f"[loop] $ {' '.join(команда)}", flush=True)
-    try:
-        результат = subprocess.run(команда, cwd=_БАЗА, check=False)
-        return результат.returncode
-    except Exception as e:
-        print(f"[loop] s3 upload упал: {type(e).__name__}: {e}", flush=True)
-        return 1
-
-
 def main(argv=None) -> int:
     парсер = argparse.ArgumentParser(description="Бесконечный цикл harvester'а")
     парсер.add_argument("--budget", type=int, default=int(os.getenv("HARVESTER_BUDGET", "2000")))
@@ -130,9 +116,16 @@ def main(argv=None) -> int:
           f"sleep=[{args.sleep_min_low}..{args.sleep_min_high}] мин, "
           f"max_iterations={args.max_iterations or '∞'}", flush=True)
     if os.getenv("S3_BUCKET"):
-        print(f"[loop] S3 upload включён (bucket={os.getenv('S3_BUCKET')})", flush=True)
+        print(f"[loop] S3 upload включён (bucket={os.getenv('S3_BUCKET')}) — "
+              f"вызывается внутри harvest_full", flush=True)
     else:
         print("[loop] S3 upload выключен (S3_BUCKET не задан — чисто локально)", flush=True)
+
+    # Сбрасываем флаг на случай повторного вызова main() в том же процессе
+    # (напр. тесты или программный запуск). Иначе сигнал из прошлого вызова
+    # останется и новый цикл не сделает ни одной итерации.
+    global _прервано
+    _прервано = False
 
     итерация = 0
     while not _прервано:
@@ -149,7 +142,7 @@ def main(argv=None) -> int:
             _сон_минут(SLEEP_ON_ERROR_MIN)
             continue
 
-        _залить_в_s3()  # no-op если нет S3_BUCKET
+        # S3 upload делается внутри harvest_full (шаг 4) — здесь повторять не нужно.
 
         if _прервано:
             break

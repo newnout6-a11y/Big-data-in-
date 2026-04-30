@@ -29,12 +29,8 @@ def test_loop_останавливается_после_max_iterations(monkeypat
     def моковый_сон(минут):
         pass  # мгновенный сон в тестах
 
-    def моковый_s3():
-        return 0
-
     monkeypatch.setattr(loop, "_запустить_итерацию", моковый_запуск)
     monkeypatch.setattr(loop, "_сон_минут", моковый_сон)
-    monkeypatch.setattr(loop, "_залить_в_s3", моковый_s3)
 
     код = loop.main([
         "--max-iterations", "2",
@@ -64,7 +60,6 @@ def test_loop_sleep_после_ошибки(monkeypatch, capsys):
 
     monkeypatch.setattr(loop, "_запустить_итерацию", моковый_запуск)
     monkeypatch.setattr(loop, "_сон_минут", моковый_сон)
-    monkeypatch.setattr(loop, "_залить_в_s3", lambda: 0)
 
     код = loop.main([
         "--max-iterations", "2",
@@ -75,6 +70,28 @@ def test_loop_sleep_после_ошибки(monkeypatch, capsys):
     assert счётчик["n"] == 2
     # Первый сон должен быть SLEEP_ON_ERROR_MIN (5 минут после ошибки)
     assert вызовы_сна[0] == loop.SLEEP_ON_ERROR_MIN
+
+
+def test_loop_сбрасывает_прервано_при_повторном_запуске(monkeypatch):
+    """Если main() вызывается дважды в том же процессе, флаг _прервано
+    должен сбрасываться — иначе второй вызов пропустит все итерации."""
+    loop._прервано = True  # симулируем состояние после предыдущего сигнала
+    итераций: list[int] = []
+
+    def моковый_запуск(args, work_min):
+        итераций.append(work_min)
+        return 0
+
+    monkeypatch.setattr(loop, "_запустить_итерацию", моковый_запуск)
+    monkeypatch.setattr(loop, "_сон_минут", lambda m: None)
+
+    код = loop.main([
+        "--max-iterations", "1",
+        "--work-min-low", "10", "--work-min-high", "10",
+        "--sleep-min-low", "0", "--sleep-min-high", "0",
+    ])
+    assert код == 0
+    assert len(итераций) == 1, "флаг не сбросился, итерация не запустилась"
 
 
 # ---------- s3_upload.py ----------
