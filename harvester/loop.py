@@ -119,7 +119,16 @@ def main(argv=None) -> int:
         print(f"[loop] S3 upload включён (bucket={os.getenv('S3_BUCKET')}) — "
               f"вызывается внутри harvest_full", flush=True)
     else:
-        print("[loop] S3 upload выключен (S3_BUCKET не задан — чисто локально)", flush=True)
+        print("[loop] S3 upload выключен (S3_BUCKET не задан)", flush=True)
+
+    if os.getenv("GDRIVE_REMOTE") or os.getenv("RCLONE_CONFIG"):
+        remote = os.getenv("GDRIVE_REMOTE", "gdrive")
+        base = os.getenv("GDRIVE_BASE", "big-data")
+        print(f"[loop] Google Drive (rclone) включён — sync с "
+              f"{remote}:{base}/ внутри harvest_full", flush=True)
+    else:
+        print("[loop] Google Drive (rclone) выключен (нет GDRIVE_REMOTE / "
+              "RCLONE_CONFIG — чисто локально)", flush=True)
 
     # Сбрасываем флаг на случай повторного вызова main() в том же процессе
     # (напр. тесты или программный запуск). Иначе сигнал из прошлого вызова

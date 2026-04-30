@@ -32,13 +32,38 @@ python -m harvester.harvest_full --budget 300 --email you@example.com
 PDF/.txt попадают в `all_pdfs/`, метаданные — в `harvested_meta/`. Состояние
 (курсоры, скачанные `doc_id`) — в `harvester/state.json`.
 
+## Бесконечный режим — локально
+
+Самый простой вариант: парсер крутится у тебя на машине, спарсенные
+PDF/DOCX/TXT/метаданные и `state.json` уезжают прямо в Google Drive
+через rclone. Никаких git push'ей с данными.
+
+```bash
+# 1) Установить rclone и авторизовать gdrive remote — гайд в
+#    документация/GOOGLE_DRIVE.md
+# 2) В .env (или env-переменными):
+#      GDRIVE_REMOTE=gdrive
+#      GDRIVE_BASE=big-data
+#      HARVESTER_EMAIL=you@example.com
+
+python -m harvester.loop --budget 500
+```
+
+`harvester.loop` бесконечно крутит `harvest_full`. До парсинга — pull
+свежего state.json из Drive, после ingest+embed — push новых
+PDF/DOCX/TXT/meta + state.json в Drive.
+
+Полный гайд: [`документация/GOOGLE_DRIVE.md`](../документация/GOOGLE_DRIVE.md).
+
 ## Бесконечный режим — GitHub Actions
 
-См. `.github/workflows/harvest.yml`. Каждые 6 часов раннер собирает свежие
-документы, ингестит, векторизует и пушит чанки в Qdrant Cloud (по env-var
-`QDRANT_URL` + `QDRANT_API_KEY`). `state.json` коммитится обратно в репо.
+См. `.github/workflows/harvest.yml`. Запускается **по запросу**
+(`workflow_dispatch`): раннер собирает свежие документы, ингестит,
+векторизует и пушит чанки в Qdrant Cloud (по env `QDRANT_URL` +
+`QDRANT_API_KEY`). `state.json` **не коммитится** обратно в репо —
+если задан секрет `RCLONE_CONFIG`, чекпоинт и корпус уезжают в Drive.
 
-Полный гайд по настройке — `документация/CRON_HARVESTER.md`.
+Полный гайд: `документация/CRON_HARVESTER.md`.
 
 ## Этика
 

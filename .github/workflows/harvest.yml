@@ -1,29 +1,31 @@
 name: harvest
 
-# Cron-харвестер: каждые 2 часа забирает свежие документы из arXiv, OpenAlex,
-# Europe PMC, Stack Exchange, Semantic Scholar (и опционально chemRxiv,
+# Харвестер по запросу: workflow_dispatch забирает свежие документы из arXiv,
+# OpenAlex, Europe PMC, Stack Exchange, Semantic Scholar (и опционально chemRxiv,
 # КиберЛенинка, CORE), ингестит их и пушит чанки в удалённый Qdrant.
-# Прогресс (cursor'ы и downloaded_ids) коммитится обратно в репо.
+#
+# Прогресс (state.json) и сами документы НЕ коммитятся обратно в репо —
+# они уезжают в Google Drive через rclone. Никаких git push'ей с данными.
 #
 # Требуемые секреты (Settings → Secrets and variables → Actions):
-#   QDRANT_URL       — URL Qdrant Cloud (обязательно)
-#   QDRANT_API_KEY   — ключ Qdrant Cloud (обязательно)
-#   HARVESTER_EMAIL  — email для User-Agent OpenAlex и для Unpaywall fallback
-#   GROQ_API_KEY     — для Streamlit-приложения (не используется в cron'е)
+#   QDRANT_URL        — URL Qdrant Cloud (обязательно)
+#   QDRANT_API_KEY    — ключ Qdrant Cloud (обязательно)
+#   HARVESTER_EMAIL   — email для User-Agent OpenAlex и для Unpaywall fallback
+#   GROQ_API_KEY      — для Streamlit-приложения (не используется в cron'е)
+#
+# Google Drive (рекомендуемый бэкап без git push):
+#   RCLONE_CONFIG     — содержимое rclone.conf c remote'ом `gdrive`
+#                       (см. документация/GOOGLE_DRIVE.md)
+#   GDRIVE_BASE       — корневая папка в Drive (default: big-data)
 #
 # Опциональные:
-#   CORE_API_KEY     — ключ https://core.ac.uk/services/api для источника CORE
-#   S3_ENDPOINT_URL  — URL S3-совместимого хранилища (Cloud.ru / Sber Cloud)
-#   S3_BUCKET        — имя бакета
-#   S3_ACCESS_KEY    — access key (для Cloud.ru формат tenant_id:key_id)
-#   S3_SECRET_KEY    — secret key
-#   S3_REGION        — регион (дефолт ru-moscow-1)
-#   S3_PREFIX        — префикс в бакете (дефолт пустой)
+#   CORE_API_KEY      — ключ https://core.ac.uk/services/api для источника CORE
+#   S3_ENDPOINT_URL   — URL S3-совместимого хранилища
+#   S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_REGION, S3_PREFIX
 # Если S3_BUCKET задан — после ingest+embed файлы синхронизируются в S3.
+# Если RCLONE_CONFIG задан — то же самое в Drive (рекомендуемый путь).
 
 on:
-  schedule:
-    - cron: "17 */2 * * *"
   workflow_dispatch:
     inputs:
       budget:
@@ -37,7 +39,7 @@ on:
         default: "2020"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: harvest
@@ -47,6 +49,11 @@ jobs:
   harvest:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    env:
+      # Прокидываем секрет через job-env, чтобы можно было проверять его
+      # пустоту в step.if (ссылаться на ${{ secrets.* }} прямо в `if:`
+      # GitHub Actions не разрешает).
+      RCLONE_CONFIG_CONTENT: ${{ secrets.RCLONE_CONFIG }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,13 +69,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run harvest → ingest → embed → S3 (опц)
+      - name: Install rclone
+        if: ${{ env.RCLONE_CONFIG_CONTENT != '' }}
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Write rclone.conf from secret
+        if: ${{ env.RCLONE_CONFIG_CONTENT != '' }}
+        run: |
+          mkdir -p "$HOME/.config/rclone"
+          printf '%s' "$RCLONE_CONFIG_CONTENT" > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          # sanity-check: видим ли remote
+          rclone listremotes --config "$HOME/.config/rclone/rclone.conf"
+
+      - name: Run harvest → ingest → embed → upload (опц)
         env:
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
           HARVESTER_EMAIL: ${{ secrets.HARVESTER_EMAIL }}
-          # Опциональные источники / S3 (если секрета нет — переменная пустая,
-          # соответствующий шаг внутри harvest_full просто пропустится)
+          # Если секрет не задан — переменная пустая, соответствующий шаг
+          # внутри harvest_full просто пропустится.
           CORE_API_KEY: ${{ secrets.CORE_API_KEY }}
           S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
@@ -76,6 +98,9 @@ jobs:
           S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
           S3_REGION: ${{ secrets.S3_REGION }}
           S3_PREFIX: ${{ secrets.S3_PREFIX }}
+          # Google Drive через rclone:
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
         run: |
           python -m harvester.harvest_full \
             --budget "${{ github.event.inputs.budget || '500' }}" \
@@ -94,16 +119,3 @@ jobs:
             harvester/state.json
           retention-days: 30
           if-no-files-found: ignore
-
-      - name: Commit state.json + logs back
-        if: always()
-        run: |
-          git config user.name  "harvester-bot"
-          git config user.email "harvester-bot@users.noreply.github.com"
-          git add harvester/state.json harvester/logs/ || true
-          if ! git diff --cached --quiet; then
-            git commit -m "harvest: incremental update [skip ci]"
-            git push
-          else
-            echo "Нет изменений в state."
-          fi
