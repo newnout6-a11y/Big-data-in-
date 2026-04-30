@@ -75,6 +75,8 @@ def собрать(
     собрано: list[Документ] = []
     текущий_offset = offset
     размер_страницы = min(100, бюджет)
+    max_429_retries = 3
+    retries_429 = 0
 
     try:
         while len(собрано) < бюджет:
@@ -92,9 +94,13 @@ def собрать(
             try:
                 ответ = клиент.get(БАЗА, params=params)
                 if ответ.status_code == 429:
-                    # Rate limit — ждём и пробуем ещё раз
+                    # Rate limit — ограниченное количество ретраев, иначе выходим
+                    if retries_429 >= max_429_retries:
+                        break
+                    retries_429 += 1
                     time.sleep(10)
                     continue
+                retries_429 = 0  # сбрасываем счётчик после успешного запроса
                 ответ.raise_for_status()
             except httpx.HTTPError:
                 time.sleep(2)
