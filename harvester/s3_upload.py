@@ -84,6 +84,11 @@ def _ключ_уже_есть(клиент, bucket: str, ключ: str) -> bool:
             return False
         # Любая другая ошибка — считаем что нет, попробуем загрузить (upload даст точный код)
         return False
+    except Exception:
+        # Сетевые ошибки (EndpointConnectionError, ConnectTimeoutError, ReadTimeoutError
+        # и пр., от BotoCoreError, а не ClientError) — считаем что ключа нет,
+        # upload_file даст точный код. Иначе один timeout ломает весь sync loop.
+        return False
 
 
 def _собрать_локальные_файлы(префикс_ключа: str) -> list[tuple[str, str]]:
