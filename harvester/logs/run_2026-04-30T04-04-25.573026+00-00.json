@@ -1,0 +1,27 @@
+{
+  "started_at": "2026-04-30T04:04:25.573026+00:00",
+  "args": {
+    "budget": 300,
+    "year_min": 2020,
+    "email": "",
+    "sources": "arxiv,openalex,europepmc,stackexchange",
+    "time_limit_min": 300,
+    "skip_ingest": false,
+    "skip_embed": false
+  },
+  "steps": {
+    "harvest": {
+      "return_code": 0,
+      "seconds": 95.9
+    },
+    "ingest": {
+      "return_code": 0,
+      "seconds": 2428.8
+    },
+    "embed": {
+      "return_code": 0,
+      "seconds": 2554.0
+    }
+  },
+  "finished_at": "2026-04-30T05:29:04.351182+00:00"
+}
