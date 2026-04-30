@@ -1,28 +1,37 @@
 name: harvest
 
-# Cron-харвестер: каждые 6 часов забирает свежие документы из arXiv, OpenAlex,
-# Europe PMC, Stack Exchange (и опционально chemRxiv/КиберЛенинка), ингестит
-# их и пушит чанки в удалённый Qdrant. Прогресс (cursor'ы и downloaded_ids)
-# коммитится обратно в репо, чтобы следующий прогон стартовал с того же места.
+# Cron-харвестер: каждые 2 часа забирает свежие документы из arXiv, OpenAlex,
+# Europe PMC, Stack Exchange, Semantic Scholar (и опционально chemRxiv,
+# КиберЛенинка, CORE), ингестит их и пушит чанки в удалённый Qdrant.
+# Прогресс (cursor'ы и downloaded_ids) коммитится обратно в репо.
 #
-# Требуемые секреты в репозитории (Settings → Secrets and variables → Actions):
+# Требуемые секреты (Settings → Secrets and variables → Actions):
 #   QDRANT_URL       — URL Qdrant Cloud (обязательно)
 #   QDRANT_API_KEY   — ключ Qdrant Cloud (обязательно)
-#   HARVESTER_EMAIL  — email для User-Agent OpenAlex (обязательно)
-#   GROQ_API_KEY     — для Streamlit-приложения (не используется в этом cron'е,
-#                      но обычно уже есть в репо)
+#   HARVESTER_EMAIL  — email для User-Agent OpenAlex и для Unpaywall fallback
+#   GROQ_API_KEY     — для Streamlit-приложения (не используется в cron'е)
+#
+# Опциональные:
+#   CORE_API_KEY     — ключ https://core.ac.uk/services/api для источника CORE
+#   S3_ENDPOINT_URL  — URL S3-совместимого хранилища (Cloud.ru / Sber Cloud)
+#   S3_BUCKET        — имя бакета
+#   S3_ACCESS_KEY    — access key (для Cloud.ru формат tenant_id:key_id)
+#   S3_SECRET_KEY    — secret key
+#   S3_REGION        — регион (дефолт ru-moscow-1)
+#   S3_PREFIX        — префикс в бакете (дефолт пустой)
+# Если S3_BUCKET задан — после ingest+embed файлы синхронизируются в S3.
 
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 */2 * * *"
   workflow_dispatch:
     inputs:
       budget:
         description: "Сколько документов за прогон (всего)"
-        default: "300"
+        default: "500"
       sources:
         description: "Источники через запятую"
-        default: "arxiv,openalex,europepmc,stackexchange"
+        default: "arxiv,openalex,europepmc,stackexchange,semanticscholar,core"
       year_min:
         description: "Минимальный год публикации"
         default: "2020"
@@ -53,16 +62,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run harvest → ingest → embed
+      - name: Run harvest → ingest → embed → S3 (опц)
         env:
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
           HARVESTER_EMAIL: ${{ secrets.HARVESTER_EMAIL }}
+          # Опциональные источники / S3 (если секрета нет — переменная пустая,
+          # соответствующий шаг внутри harvest_full просто пропустится)
+          CORE_API_KEY: ${{ secrets.CORE_API_KEY }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+          S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
+          S3_REGION: ${{ secrets.S3_REGION }}
+          S3_PREFIX: ${{ secrets.S3_PREFIX }}
         run: |
           python -m harvester.harvest_full \
-            --budget "${{ github.event.inputs.budget || '300' }}" \
+            --budget "${{ github.event.inputs.budget || '500' }}" \
             --year-min "${{ github.event.inputs.year_min || '2020' }}" \
-            --sources "${{ github.event.inputs.sources || 'arxiv,openalex,europepmc,stackexchange' }}" \
+            --sources "${{ github.event.inputs.sources || 'arxiv,openalex,europepmc,stackexchange,semanticscholar,core' }}" \
+            --email "${{ secrets.HARVESTER_EMAIL }}" \
             --time-limit-min 300
 
       - name: Upload run artifacts
