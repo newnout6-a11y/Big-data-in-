@@ -29,14 +29,20 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from . import state
-from .sources import arxiv, chemrxiv, openalex, europepmc, cyberleninka, stackexchange
+from .sources import (
+    arxiv, chemrxiv, openalex, europepmc, cyberleninka, stackexchange,
+    semantic_scholar, core_api, unpaywall,
+)
 
 
 _БАЗА = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ПАПКА_PDF = os.path.join(_БАЗА, "all_pdfs")
 ПАПКА_МЕТА = os.path.join(_БАЗА, "harvested_meta")
 
-ВСЕ_ИСТОЧНИКИ = ["arxiv", "chemrxiv", "openalex", "europepmc", "cyberleninka", "stackexchange"]
+ВСЕ_ИСТОЧНИКИ = [
+    "arxiv", "chemrxiv", "openalex", "europepmc", "cyberleninka", "stackexchange",
+    "semanticscholar", "core",
+]
 
 
 _ТРАНСЛИТ = {
@@ -127,6 +133,23 @@ def _печать(строка: str) -> None:
     print(строка, flush=True)
 
 
+# Email, под которым Unpaywall/OpenAlex принимают запросы. Устанавливается
+# в запустить() из args.email, читается в обработать_документ().
+_ТЕКУЩИЙ_EMAIL = ""
+
+
+def _извлечь_doi_из_doc_id(doc_id: str) -> str | None:
+    """Если в doc_id зашит DOI (10.XXXX/...) — возвращает его без префикса.
+    Используется только для Unpaywall-fallback'а."""
+    if not doc_id:
+        return None
+    import re as _re
+    m = _re.search(r"10\.\d{4,9}/[^\s]+", doc_id)
+    if m:
+        return m.group(0).rstrip(".,;")
+    return None
+
+
 def обработать_документ(док, состояние, клиент_pdf):
     if state.уже_скачан(состояние, док.doc_id):
         # Отдельно отметим если дубль пришёл из другого источника через
@@ -174,9 +197,22 @@ def обработать_документ(док, состояние, клиен
     _печать(f"[{док.источник}] GET  {имя} ← {док.pdf_url[:80]}")
     данные = _скачать_pdf(клиент_pdf, док.pdf_url)
     if not данные:
-        state.залогировать(f"FAIL {док.doc_id} {док.pdf_url}")
-        _печать(f"[{док.источник}] FAIL {док.doc_id}")
-        return False
+        # Unpaywall fallback: если в doc_id зашит DOI и есть email — просим
+        # Unpaywall легальную OA-копию. Часто NEJM/Cell/Science paywall PDF
+        # при этом доступны как authors' preprint на PMC или институте.
+        email = _ТЕКУЩИЙ_EMAIL or os.environ.get("HARVESTER_EMAIL", "").strip()
+        doi_для_unpaywall = _извлечь_doi_из_doc_id(док.doc_id)
+        if doi_для_unpaywall and email:
+            альт = unpaywall.найти_oa_pdf(doi_для_unpaywall, email=email)
+            if альт and альт != док.pdf_url:
+                _печать(f"[{док.источник}] UNPAYWALL {альт[:80]}")
+                данные = _скачать_pdf(клиент_pdf, альт)
+                if данные:
+                    док = док._replace(pdf_url=альт) if hasattr(док, "_replace") else док
+        if not данные:
+            state.залогировать(f"FAIL {док.doc_id} {док.pdf_url}")
+            _печать(f"[{док.источник}] FAIL {док.doc_id}")
+            return False
     os.makedirs(ПАПКА_PDF, exist_ok=True)
     with open(путь, "wb") as f:
         f.write(данные)
@@ -332,6 +368,51 @@ def _сейчас():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _собрать_semanticscholar(args, состояние, клиент_pdf, бюджет):
+    """Semantic Scholar API по списку запросов с per-query offset."""
+    конф = состояние["sources"].setdefault("semanticscholar", {"offsets": {}, "last_run": None})
+    скачано = 0
+    запросы = semantic_scholar.ЗАПРОСЫ_ПО_УМОЛЧАНИЮ
+    на_запрос = max(1, бюджет // len(запросы))
+    for q in запросы:
+        offset = конф["offsets"].get(q, 0)
+        print(f"[semanticscholar] '{q[:30]}' бюджет {на_запрос}, offset {offset}")
+        доки, новый = semantic_scholar.собрать(
+            запрос=q, offset=offset, бюджет=на_запрос,
+            год_не_раньше=args.year_min, user_agent=_ua(args),
+        )
+        for док in доки:
+            if обработать_документ(док, состояние, клиент_pdf):
+                скачано += 1
+        конф["offsets"][q] = новый
+    конф["last_run"] = _сейчас()
+    return скачано
+
+
+def _собрать_core(args, состояние, клиент_pdf, бюджет):
+    """CORE API — требует CORE_API_KEY в env. Без ключа бесшумно пропускает."""
+    if not os.getenv("CORE_API_KEY", "").strip():
+        print("[core] пропущено: задай ENV CORE_API_KEY (https://core.ac.uk/services/api#what-is-included)")
+        return 0
+    конф = состояние["sources"].setdefault("core", {"offsets": {}, "last_run": None})
+    скачано = 0
+    запросы = core_api.ЗАПРОСЫ_ПО_УМОЛЧАНИЮ
+    на_запрос = max(1, бюджет // len(запросы))
+    for q in запросы:
+        offset = конф["offsets"].get(q, 0)
+        print(f"[core] '{q[:30]}' бюджет {на_запрос}, offset {offset}")
+        доки, новый = core_api.собрать(
+            запрос=q, offset=offset, бюджет=на_запрос,
+            год_не_раньше=args.year_min, user_agent=_ua(args),
+        )
+        for док in доки:
+            if обработать_документ(док, состояние, клиент_pdf):
+                скачано += 1
+        конф["offsets"][q] = новый
+    конф["last_run"] = _сейчас()
+    return скачано
+
+
 СБОРЩИКИ = {
     "arxiv": _собрать_arxiv,
     "chemrxiv": _собрать_chemrxiv,
@@ -339,10 +420,15 @@ def _сейчас():
     "europepmc": _собрать_europepmc,
     "cyberleninka": _собрать_cyberleninka,
     "stackexchange": _собрать_stackexchange,
+    "semanticscholar": _собрать_semanticscholar,
+    "core": _собрать_core,
 }
 
 
 def запустить(args):
+    global _ТЕКУЩИЙ_EMAIL
+    _ТЕКУЩИЙ_EMAIL = (args.email or "").strip()
+
     источники = [s.strip() for s in args.sources.split(",") if s.strip()]
     неизвестные = [s for s in источники if s not in СБОРЩИКИ]
     if неизвестные:

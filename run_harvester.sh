@@ -15,7 +15,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 : "${HARVESTER_BUDGET:=200}"
-: "${HARVESTER_SOURCES:=arxiv,chemrxiv,openalex,europepmc,cyberleninka,stackexchange}"
+: "${HARVESTER_SOURCES:=arxiv,chemrxiv,openalex,europepmc,cyberleninka,stackexchange,semanticscholar}"
 : "${HARVESTER_YEAR_MIN:=2020}"
 : "${HARVESTER_EMAIL:=you@example.com}"
 

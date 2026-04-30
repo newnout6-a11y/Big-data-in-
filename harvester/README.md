@@ -12,6 +12,9 @@
 | `sources/europepmc.py` | OA full-text по 8 ключевым запросам | REST, стабильный курсорный пейджинг |
 | `sources/cyberleninka.py` | RU OAI-PMH (по дате) | Метаданные стабильны, PDF — CDN, может блокироваться |
 | `sources/stackexchange.py` | Q+top answer (chemistry, ai, datascience, cs) | Без ключа: 10 000 запросов/день |
+| `sources/semantic_scholar.py` | 200M+ публикаций, только с OA PDF | Без ключа 100 req/5min; можно указать `SEMANTIC_SCHOLAR_API_KEY` |
+| `sources/core_api.py` | 130M+ OA-документов (CORE) | Требует `CORE_API_KEY` env; free tier 10 req/min, 1000/day |
+| `sources/unpaywall.py` | Helper, не источник. По DOI ищет OA-копию | Fallback при paywall у openalex/europepmc |
 
 ## Запуск локально
 

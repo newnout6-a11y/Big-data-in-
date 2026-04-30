@@ -89,7 +89,7 @@ def main(argv=None) -> int:
     парсер.add_argument("--email", type=str, default=os.getenv("HARVESTER_EMAIL", ""))
     парсер.add_argument("--sources", type=str, default=os.getenv(
         "HARVESTER_SOURCES",
-        "arxiv,chemrxiv,openalex,europepmc,cyberleninka,stackexchange",
+        "arxiv,chemrxiv,openalex,europepmc,cyberleninka,stackexchange,semanticscholar",
     ))
     парсер.add_argument("--work-min-low", type=int, default=int(os.getenv("HARVEST_WORK_MIN_LOW", "100")))
     парсер.add_argument("--work-min-high", type=int, default=int(os.getenv("HARVEST_WORK_MIN_HIGH", "140")))
