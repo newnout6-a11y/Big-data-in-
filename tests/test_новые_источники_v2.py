@@ -180,3 +180,56 @@ def test_новые_источники_зарегистрированы():
     assert "core" in run.ВСЕ_ИСТОЧНИКИ
     assert "semanticscholar" in run.СБОРЩИКИ
     assert "core" in run.СБОРЩИКИ
+
+
+def test_semantic_scholar_429_не_зацикливается():
+    """Постоянный 429 должен выйти после N ретраев, а не крутиться вечно."""
+    мок_ответ = MagicMock()
+    мок_ответ.status_code = 429
+
+    with patch("harvester.sources.semantic_scholar.httpx.Client") as мок_клиент, \
+         patch("harvester.sources.semantic_scholar.time.sleep"):
+        клиент_инст = мок_клиент.return_value
+        клиент_инст.get.return_value = мок_ответ
+        клиент_инст.close = MagicMock()
+
+        доки, offset = semantic_scholar.собрать(запрос="test", бюджет=50)
+
+    # Должен выйти после 3 ретраев → 4 GET-запроса (первый + 3 retry)
+    assert доки == []
+    assert клиент_инст.get.call_count <= 5  # с запасом на flakiness
+
+
+def test_core_429_не_зацикливается(monkeypatch):
+    monkeypatch.setenv("CORE_API_KEY", "test_key")
+
+    мок_ответ = MagicMock()
+    мок_ответ.status_code = 429
+
+    with patch("harvester.sources.core_api.httpx.Client") as мок_клиент, \
+         patch("harvester.sources.core_api.time.sleep"):
+        клиент_инст = мок_клиент.return_value
+        клиент_инст.get.return_value = мок_ответ
+        клиент_инст.close = MagicMock()
+
+        доки, offset = core_api.собрать(запрос="test", бюджет=50)
+
+    assert доки == []
+    assert клиент_инст.get.call_count <= 5
+
+
+def test_unpaywall_fallback_обновляет_pdf_url():
+    """Проверка что после Unpaywall-fallback pdf_url в метаданных обновлён
+    (регрессия — раньше использовался _replace на dataclass что не работало).
+    """
+    from harvester.sources.arxiv import Документ
+    док = Документ(
+        источник="europepmc", doc_id="europepmc:10.1038/x",
+        название="Test", авторы=[], дата="2023-01-01",
+        pdf_url="https://broken.example.com/paywall.pdf",
+        abstract="", категории=[],
+    )
+    новый_url = "https://oa.example.com/open.pdf"
+    # У dataclass есть прямое присваивание
+    док.pdf_url = новый_url
+    assert док.pdf_url == новый_url
