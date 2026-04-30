@@ -2,7 +2,12 @@ import math
 import os
 import re
 import json
+import mimetypes
 from datetime import datetime
+from pathlib import Path
+
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("USE_TF", "0")
 
 import streamlit as st
 from sentence_transformers import SentenceTransformer
@@ -12,6 +17,8 @@ from groq import Groq
 from dotenv import load_dotenv
 
 import дизайн
+import notebooks
+import study_tools
 from cases import кейсы, получить_название_кейса
 from fallback_answers import заготовленные_ответы
 from taxonomy import ДОМЕНЫ, название_домена, название_субдомена
@@ -23,6 +30,7 @@ from классификатор import (
 )
 
 load_dotenv()
+APP_DIR = Path(__file__).resolve().parent
 
 st.set_page_config(
     page_title="Навигатор цифровой химии",
@@ -258,13 +266,23 @@ def вставить_цитаты_в_ответ(текст, фрагменты):
             цитата += "…"
         doc_attr = _экранировать_атрибут(f"{документ}, стр. {страница}")
         text_attr = _экранировать_атрибут(цитата)
+        url = notebooks.citation_url(фр)
+        if url and isinstance(фр, dict):
+            фр["citation_url"] = url
+        href = _экранировать_атрибут(url or "")
+        открывающий = (
+            f'<a class="cite" href="{href}" target="_blank" rel="noopener" '
+            f'title="Открыть документ на странице {страница}">'
+            if url else '<span class="cite">'
+        )
+        закрывающий = '</a>' if url else '</span>'
         return (
-            f'<span class="cite">'
+            f'{открывающий}'
             f'[{n}]'
             f'<span class="cite-tip">'
             f'<span class="cite-doc">{doc_attr}</span>'
             f'<span class="cite-text">{text_attr}</span>'
-            f'</span></span>'
+            f'</span>{закрывающий}'
         )
 
     return re.sub(r"\[(\d+)\]", замена, безопасный)
@@ -437,8 +455,10 @@ def получить_ответ_от_groq(вопрос, фрагменты):
 
     контекст = ""
     for i, фр in enumerate(фрагменты, 1):
-        контекст += f"[{i}] Документ: {фр.payload['document']}, стр. {фр.payload['page']}\n"
-        контекст += фр.payload["text"] + "\n\n"
+        payload = фр if isinstance(фр, dict) else фр.payload
+        источник = "мои документы" if payload.get("source") == "user_upload" else "корпус"
+        контекст += f"[{i}] Источник: {источник}. Документ: {payload['document']}, стр. {payload['page']}\n"
+        контекст += payload["text"] + "\n\n"
 
     ответ = вызвать_groq({
         "model": "llama-3.3-70b-versatile",
@@ -453,6 +473,239 @@ def получить_ответ_от_groq(вопрос, фрагменты):
     текст = отрезать_источники(текст)
     текст = убрать_неверные_маркеры(текст, фрагменты)
     return текст
+
+
+def сериализовать_фрагменты(точки):
+    фрагменты = []
+    for т in точки:
+        payload = т if isinstance(т, dict) else т.payload
+        фрагменты.append({
+            "document": payload.get("document", ""),
+            "page": payload.get("page", ""),
+            "case": payload.get("case", ""),
+            "text": payload.get("text", ""),
+            "score": float(getattr(т, "score", payload.get("score", 0.0)) or 0.0),
+            "domain": payload.get("domain"),
+            "subdomain": payload.get("subdomain"),
+            "year": payload.get("year"),
+            "source": payload.get("source"),
+            "title": payload.get("title"),
+            "language": payload.get("language"),
+            "user_id": payload.get("user_id"),
+            "notebook_id": payload.get("notebook_id"),
+            "notebook_title": payload.get("notebook_title"),
+            "file_path": payload.get("file_path"),
+            "file_type": payload.get("file_type"),
+            "file_hash": payload.get("file_hash"),
+        })
+    return фрагменты
+
+
+def показать_скачивание_источников(фрагменты, key_prefix):
+    доступные = []
+    seen = set()
+    for фр in фрагменты:
+        путь = notebooks.source_file_path(фр)
+        if not путь:
+            continue
+        ключ = str(путь.resolve()).lower()
+        if ключ in seen:
+            continue
+        seen.add(ключ)
+        доступные.append((путь, фр))
+
+    if not доступные:
+        st.caption("Локальные файлы источников не найдены. Для harvest-документов проверьте наличие файла в папке all_pdfs/.")
+        return
+
+    st.markdown("**Скачать документы-источники:**")
+    for i, (путь, фр) in enumerate(доступные, 1):
+        try:
+            данные = путь.read_bytes()
+        except OSError as ошибка:
+            st.caption(f"{путь.name}: не удалось прочитать файл ({ошибка})")
+            continue
+        mime = mimetypes.guess_type(путь.name)[0] or "application/octet-stream"
+        st.download_button(
+            label=f"Скачать {путь.name}",
+            data=данные,
+            file_name=путь.name,
+            mime=mime,
+            key=f"{key_prefix}_source_{i}_{abs(hash(str(путь)))}",
+            use_container_width=True,
+        )
+
+
+def показать_экспорт_ответа(заголовок, текст, фрагменты, key_prefix):
+    к1, к2 = st.columns(2, gap="small")
+    with к1:
+        st.download_button(
+            "Скачать ответ .md",
+            data=study_tools.markdown_export(заголовок, текст, фрагменты),
+            file_name="navigator_answer.md",
+            mime="text/markdown",
+            key=f"{key_prefix}_md",
+            use_container_width=True,
+        )
+    with к2:
+        st.download_button(
+            "Скачать ответ .docx",
+            data=study_tools.docx_export(заголовок, текст, фрагменты),
+            file_name="navigator_answer.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key=f"{key_prefix}_docx",
+            use_container_width=True,
+        )
+
+
+def использованные_номера_цитат(текст, всего):
+    номера = []
+    for match in re.finditer(r"\[(\d+)\]", текст or ""):
+        номер = int(match.group(1))
+        if 1 <= номер <= всего and номер not in номера:
+            номера.append(номер)
+    return номера
+
+
+def сделать_выдержку(текст, лимит=700):
+    чистый = почистить_pdf_текст(текст or "")
+    if len(чистый) <= лимит:
+        return чистый
+    предложения = re.split(r"(?<=[.!?])\s+", чистый)
+    выбранные = []
+    длина = 0
+    for предложение in предложения:
+        предложение = предложение.strip()
+        if not предложение:
+            continue
+        if len(предложение) < 25 and выбранные:
+            continue
+        if длина + len(предложение) > лимит and выбранные:
+            break
+        выбранные.append(предложение)
+        длина += len(предложение) + 1
+    выдержка = " ".join(выбранные).strip() or чистый[:лимит].strip()
+    if len(выдержка) < len(чистый):
+        выдержка = выдержка.rstrip(" .") + "…"
+    return выдержка
+
+
+def показать_фрагмент_основания(номер, фр, key_prefix):
+    документ = фр.get("document", "")
+    страница = фр.get("page", "")
+    score = фр.get("score", 0.0)
+    заголовок = f"[{номер}] {документ} · стр. {страница} · score {score:.3f}"
+    with st.expander(заголовок, expanded=(номер == 1)):
+        метки = []
+        if фр.get("domain"):
+            дом = фр["domain"]
+            метки.append(название_домена(дом))
+            if фр.get("subdomain"):
+                метки.append(название_субдомена(дом, фр["subdomain"]))
+        if фр.get("year"):
+            метки.append(str(фр["year"]))
+        if фр.get("source"):
+            метки.append(фр["source"])
+        if метки:
+            st.caption(" · ".join(метки))
+        if фр.get("case"):
+            st.caption(f"Кейс: {получить_название_кейса(фр['case'])}")
+
+        путь = notebooks.source_file_path(фр)
+        if путь:
+            try:
+                st.download_button(
+                    f"Скачать документ: {путь.name}",
+                    data=путь.read_bytes(),
+                    file_name=путь.name,
+                    mime=mimetypes.guess_type(путь.name)[0] or "application/octet-stream",
+                    key=f"{key_prefix}_download_{номер}_{abs(hash(str(путь)))}",
+                    use_container_width=True,
+                )
+            except OSError as ошибка:
+                st.caption(f"Не удалось прочитать файл: {ошибка}")
+
+        st.markdown("**Выдержка:**")
+        st.markdown(сделать_выдержку(фр.get("text", "")))
+        st.text_area(
+            "Полный текст фрагмента",
+            value=почистить_pdf_текст(фр.get("text", "")),
+            height=180,
+            disabled=True,
+            key=f"{key_prefix}_full_{номер}",
+        )
+
+
+def учебные_фрагменты(тетрадь, документ, тема, лимит=16):
+    клиент = загрузить_qdrant()
+    модель = загрузить_модель()
+    тема = (тема or "").strip()
+    if тема:
+        точки = notebooks.search_notebook(
+            клиент,
+            модель,
+            тетрадь,
+            f"{документ or ''} {тема}",
+            limit=лимит,
+            user_id=пользователь_id,
+            min_score=0.0,
+        )
+        фрагменты = сериализовать_фрагменты(точки)
+        if документ and документ != "Все документы":
+            фрагменты = [фр for фр in фрагменты if фр.get("document") == документ]
+        if фрагменты:
+            return фрагменты[:лимит]
+
+    return notebooks.notebook_fragments(
+        клиент,
+        тетрадь,
+        user_id=пользователь_id,
+        document=документ,
+        limit=лимит,
+    )
+
+
+def учебный_текстовый_ответ(задача, фрагменты, max_tokens=1800):
+    if not _ключи_groq():
+        return "Ошибка: GROQ_API_KEY не задан в файле .env"
+    контекст = study_tools.fragments_context(фрагменты)
+    ответ = вызвать_groq({
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": (
+                "Ты учебный ассистент. Отвечай только по CONTEXT, на русском языке. "
+                "Каждый тезис, определение, вопрос или вывод подкрепляй маркером [N] из CONTEXT. "
+                "Если данных нет, прямо скажи что в выбранных документах этого нет. "
+                "Не добавляй отдельный список источников в конце."
+            )},
+            {"role": "user", "content": f"CONTEXT:\n{контекст}\n\nTASK:\n{задача}"}
+        ],
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+    })
+    текст = отрезать_источники(ответ.choices[0].message.content)
+    return убрать_неверные_маркеры(текст, фрагменты)
+
+
+def учебный_json_ответ(задача, фрагменты, max_tokens=1800):
+    if not _ключи_groq():
+        raise RuntimeError("GROQ_API_KEY не задан в файле .env")
+    контекст = study_tools.fragments_context(фрагменты)
+    ответ = вызвать_groq({
+        "model": "llama-3.3-70b-versatile",
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": (
+                "Ты учебный ассистент. Используй только CONTEXT. "
+                "Верни строго валидный JSON без markdown. "
+                "Все ответы, тезисы и объяснения должны быть на русском и с citation-маркерами [N]."
+            )},
+            {"role": "user", "content": f"CONTEXT:\n{контекст}\n\nTASK:\n{задача}"}
+        ],
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+    })
+    return study_tools.parse_json_loose(ответ.choices[0].message.content)
 
 
 def убрать_неверные_маркеры(ответ, фрагменты, абс_порог=0.65, дельта=0.015, ratio=0.97):
@@ -649,8 +902,15 @@ for ключ, данные in кейсы.items():
 дизайн.показать_терминал()
 дизайн.показать_подсказку_скролла(текст="попробуйте сами ↓", отступ_сверху_rem=3)
 
+пользователь_id = notebooks.get_user_id()
+тетради = notebooks.list_notebooks(пользователь_id)
+if тетради:
+    активная_тетрадь_id = st.session_state.get("активная_тетрадь_id")
+    if активная_тетрадь_id not in {т["id"] for т in тетради}:
+        активная_тетрадь_id = тетради[0]["id"]
+        st.session_state["активная_тетрадь_id"] = активная_тетрадь_id
 
-вкладка1, вкладка2, вкладка3 = st.tabs(["Поиск", "Кейсы", "Архитектура"])
+вкладка1, вкладка2, вкладка3, вкладка4, вкладка5 = st.tabs(["Поиск", "Мои документы", "Учёба", "Кейсы", "Архитектура"])
 
 with вкладка1:
     дизайн.показать_заголовок("Задайте вопрос базе знаний")
@@ -665,18 +925,56 @@ with вкладка1:
 
     _, новая_схема, _ = выбрать_коллекцию()
 
+    режимы_запроса = {
+        "my": "Только по моим документам",
+        "corpus": "Только по корпусу из интернета",
+        "mixed": "Мои + корпус",
+    }
+    р1, р2 = st.columns([1.6, 1.1], gap="small")
+    with р1:
+        режим_запроса = st.radio(
+            "Режим запроса",
+            options=list(режимы_запроса.keys()),
+            format_func=lambda к: режимы_запроса[к],
+            horizontal=True,
+            key="режим_запроса",
+        )
+    искать_в_моих = режим_запроса in ("my", "mixed")
+    искать_в_корпусе = режим_запроса in ("corpus", "mixed")
+    with р2:
+        варианты_тетрадей = [т["id"] for т in тетради]
+        индекс_тетради = 0
+        if варианты_тетрадей and st.session_state.get("активная_тетрадь_id") in варианты_тетрадей:
+            индекс_тетради = варианты_тетрадей.index(st.session_state["активная_тетрадь_id"])
+        выбранная_тетрадь_id = st.selectbox(
+            "Тетрадь",
+            options=варианты_тетрадей,
+            index=индекс_тетради,
+            format_func=lambda notebook_id: notebooks.notebook_label(
+                next(т for т in тетради if т["id"] == notebook_id)
+            ),
+            disabled=not искать_в_моих,
+            key="поиск_тетрадь",
+        ) if варианты_тетрадей else None
+        if выбранная_тетрадь_id:
+            st.session_state["активная_тетрадь_id"] = выбранная_тетрадь_id
+    выбранная_тетрадь = notebooks.get_notebook(выбранная_тетрадь_id, пользователь_id) if выбранная_тетрадь_id else None
+
     к1, к2, к3, к4 = st.columns([2, 1.3, 1, 1.2], gap="small")
     with к1:
         выбор_кейса = st.selectbox(
             "Фильтр по кейсу",
             options=list(названия_кейсов.keys()),
-            format_func=lambda к: названия_кейсов[к]
+            format_func=lambda к: названия_кейсов[к],
+            disabled=not искать_в_корпусе,
         )
     with к2:
         количество_фрагментов = st.slider("Фрагментов", 3, 10, 5)
     with к3:
         дизайн.показать_вертикальный_отступ()
-        демо_режим = st.toggle("Демо-режим", value=False)
+        демо_режим = st.toggle("Демо-режим", value=False, disabled=(режим_запроса != "corpus"))
+        if режим_запроса != "corpus":
+            демо_режим = False
     with к4:
         дизайн.показать_вертикальный_отступ()
         кнопка = st.button("Найти ответ", type="primary", use_container_width=True)
@@ -687,7 +985,7 @@ with вкладка1:
     выбор_языка = "все"
     вес_свежести = 0.0
     использовать_reranker = False
-    if новая_схема:
+    if новая_схема and искать_в_корпусе:
         with st.expander("Расширенные фильтры (домен, год, язык, свежесть, reranker)", expanded=False):
             ф1, ф2, ф3, ф4, ф5 = st.columns([1.4, 1.4, 1, 1, 1.2], gap="small")
             with ф1:
@@ -755,58 +1053,102 @@ with вкладка1:
             st.session_state.результаты_поиска = {"тип": "демо", "данные": демо}
         else:
             try:
-                if новая_схема:
-                    модель_e5 = загрузить_модель()
-                    метки_p, прото_p, негативы_p = прототипы_доменов()
-                    in_scope, авто_дом, авто_суб, скор_scope = проверить_scope(
-                        вопрос_пользователя, модель_e5,
-                        метки_p, прото_p, негативы_p,
-                    )
-                    if not in_scope:
+                модель_e5 = загрузить_модель()
+                мои_точки = []
+                корпус_точки = []
+                заметка = None
+
+                if искать_в_моих:
+                    if not выбранная_тетрадь:
                         st.session_state.результаты_поиска = {
-                            "тип": "off_topic",
-                            "scope_score": скор_scope,
-                            "примеры": примеры_in_scope_вопросов(),
+                            "тип": "notebook_empty",
+                            "тетрадь": "не выбрана",
+                        }
+                        st.stop()
+                    with st.spinner(f"Поиск в тетради «{выбранная_тетрадь['title']}»..."):
+                        мои_точки = notebooks.search_notebook(
+                            загрузить_qdrant(),
+                            модель_e5,
+                            выбранная_тетрадь,
+                            вопрос_пользователя,
+                            limit=количество_фрагментов,
+                            user_id=пользователь_id,
+                        )
+
+                    if режим_запроса == "my" and not мои_точки:
+                        st.session_state.результаты_поиска = {
+                            "тип": "notebook_empty",
+                            "тетрадь": выбранная_тетрадь["title"],
                         }
                         st.stop()
 
-                with st.spinner("Векторный поиск в Qdrant..."):
-                    точки = найти_похожие(
-                        вопрос_пользователя,
-                        выбор_кейса,
-                        количество_фрагментов,
-                        домен=выбор_домена,
-                        субдомен=выбор_субдомена,
-                        год_от=выбор_года_от,
-                        язык=выбор_языка,
-                        recency_weight=вес_свежести,
-                        использовать_reranker=использовать_reranker,
-                    )
+                if искать_в_корпусе:
+                    лимит_корпуса = количество_фрагментов
+                    if режим_запроса == "mixed":
+                        лимит_корпуса = max(0, количество_фрагментов - len(мои_точки))
+                        if not мои_точки:
+                            заметка = (
+                                f"В тетради «{выбранная_тетрадь['title']}» ответа не найдено; "
+                                "использован корпус как бэкап."
+                            ) if выбранная_тетрадь else None
+
+                    if лимит_корпуса > 0:
+                        if новая_схема:
+                            метки_p, прото_p, негативы_p = прототипы_доменов()
+                            in_scope, авто_дом, авто_суб, скор_scope = проверить_scope(
+                                вопрос_пользователя, модель_e5,
+                                метки_p, прото_p, негативы_p,
+                            )
+                            if not in_scope:
+                                if режим_запроса == "corpus" or not мои_точки:
+                                    st.session_state.результаты_поиска = {
+                                        "тип": "off_topic",
+                                        "scope_score": скор_scope,
+                                        "примеры": примеры_in_scope_вопросов(),
+                                    }
+                                    st.stop()
+                                лимит_корпуса = 0
+
+                    if лимит_корпуса > 0:
+                        with st.spinner("Векторный поиск в harvest-корпусе Qdrant..."):
+                            корпус_точки = найти_похожие(
+                                вопрос_пользователя,
+                                выбор_кейса,
+                                лимит_корпуса,
+                                домен=выбор_домена,
+                                субдомен=выбор_субдомена,
+                                год_от=выбор_года_от,
+                                язык=выбор_языка,
+                                recency_weight=вес_свежести,
+                                использовать_reranker=использовать_reranker,
+                            )
+
+                if режим_запроса == "my":
+                    точки = мои_точки
+                elif режим_запроса == "mixed":
+                    точки = (мои_точки + корпус_точки)[:количество_фрагментов]
+                else:
+                    точки = корпус_точки
+
                 if not точки:
-                    st.session_state.результаты_поиска = None
-                    st.warning("Ничего не найдено. Попробуйте изменить вопрос или кейс.")
+                    if искать_в_моих:
+                        st.session_state.результаты_поиска = {
+                            "тип": "notebook_empty",
+                            "тетрадь": выбранная_тетрадь["title"] if выбранная_тетрадь else "не выбрана",
+                        }
+                    else:
+                        st.session_state.результаты_поиска = None
+                        st.warning("Ничего не найдено. Попробуйте изменить вопрос или кейс.")
                 else:
                     with st.spinner("Генерация ответа · llama-3.3-70b..."):
                         ответ = получить_ответ_от_groq(вопрос_пользователя, точки)
                     st.session_state.результаты_поиска = {
                         "тип": "rag",
+                        "режим": режимы_запроса[режим_запроса],
+                        "тетрадь": выбранная_тетрадь["title"] if выбранная_тетрадь and искать_в_моих else None,
+                        "заметка": заметка,
                         "ответ": ответ,
-                        "фрагменты": [
-                            {
-                                "document": т.payload.get("document", ""),
-                                "page": т.payload.get("page", ""),
-                                "case": т.payload.get("case", ""),
-                                "text": т.payload.get("text", ""),
-                                "score": float(т.score),
-                                "domain": т.payload.get("domain"),
-                                "subdomain": т.payload.get("subdomain"),
-                                "year": т.payload.get("year"),
-                                "source": т.payload.get("source"),
-                                "title": т.payload.get("title"),
-                                "language": т.payload.get("language"),
-                            }
-                            for т in точки
-                        ],
+                        "фрагменты": сериализовать_фрагменты(точки),
                     }
             except Exception as ошибка:
                 st.session_state.результаты_поиска = None
@@ -826,6 +1168,11 @@ with вкладка1:
         st.markdown("**Примеры вопросов, на которые я отвечу:**")
         for пр in результат["примеры"]:
             st.markdown(f"- {пр}")
+    elif результат and результат.get("тип") == "notebook_empty":
+        st.warning(
+            f"В ваших документах этого нет. Хотите поискать в корпусе? "
+            f"Тетрадь: {результат.get('тетрадь', 'не выбрана')}."
+        )
     elif результат and результат["тип"] == "демо":
         демо = результат["данные"]
         дизайн.показать_мета_демо(демо.get("кейс", ""))
@@ -842,73 +1189,450 @@ with вкладка1:
         есть_маркеры = bool(re.search(r"\[\d+\]", ответ))
 
         дизайн.показать_мета_rag(len(фрагменты))
+        if результат.get("режим"):
+            st.caption("Режим: " + результат["режим"] + (f" · тетрадь: {результат['тетрадь']}" if результат.get("тетрадь") else ""))
+        if результат.get("заметка"):
+            st.info(результат["заметка"])
         st.markdown(вставить_цитаты_в_ответ(ответ, фрагменты), unsafe_allow_html=True)
 
         if есть_маркеры:
             дизайн.показать_заголовок("Источники", отступ_сверху_rem=3)
             дизайн.показать_источники_rag(фрагменты)
+            показать_скачивание_источников(фрагменты, "rag")
 
-        дизайн.показать_заголовок("Найденные фрагменты", отступ_сверху_rem=3)
-        if not есть_маркеры:
+        показать_экспорт_ответа("Ответ Навигатора", ответ, фрагменты, "rag_answer")
+
+        дизайн.показать_заголовок("Фрагменты-основания", отступ_сверху_rem=3)
+        номера_цитат = использованные_номера_цитат(ответ, len(фрагменты))
+        if номера_цитат:
+            st.caption("Сначала показаны только те фрагменты, на которые модель реально сослалась в ответе.")
+            for номер in номера_цитат:
+                показать_фрагмент_основания(номер, фрагменты[номер - 1], "used_fragment")
+            остальные = [i for i in range(1, len(фрагменты) + 1) if i not in номера_цитат]
+            if остальные:
+                st.markdown("**Дополнительные найденные фрагменты:**")
+                for номер in остальные:
+                    показать_фрагмент_основания(номер, фрагменты[номер - 1], "extra_fragment")
+        else:
             st.caption(
-                "Эти фрагменты найдены векторным поиском по близости вопроса, "
-                "но модель не нашла в них ничего применимого к ответу. "
-                "Поэтому раздел «Источники» не показан."
+                "Модель не сослалась на эти найденные фрагменты в ответе. "
+                "Показываю их как диагностический материал поиска."
             )
-        переводить = st.toggle(
-            "Показать перевод на русский",
-            value=False,
-            key="переводить_фрагменты",
-            help="Перевод через LLM, кэшируется."
-        )
-
-        for i, фр in enumerate(фрагменты, 1):
-            заголовок = f"{i:02d}   {фр['document']}   ·   стр. {фр['page']}   ·   score {фр['score']:.3f}"
-            with st.expander(заголовок):
-                метки = []
-                if фр.get("domain"):
-                    дом = фр["domain"]
-                    метки.append(название_домена(дом))
-                    if фр.get("subdomain"):
-                        метки.append(название_субдомена(дом, фр["subdomain"]))
-                if фр.get("year"):
-                    метки.append(str(фр["year"]))
-                if фр.get("source"):
-                    метки.append(фр["source"])
-                if метки:
-                    st.markdown("**Метки:** " + " · ".join(метки))
-                if фр.get("case"):
-                    st.markdown(f"**Кейс:** {получить_название_кейса(фр['case'])}")
-                чистый = почистить_pdf_текст(фр["text"])
-
-                with st.spinner("Поиск формул..."):
-                    формулы = извлечь_формулы(чистый[:2000])
-                if формулы:
-                    st.markdown("**Формулы:**")
-                    for ф in формулы:
-                        латех = ф.get("latex", "")
-                        описание = ф.get("описание") or ф.get("description", "")
-                        if латех:
-                            try:
-                                st.latex(латех)
-                            except Exception:
-                                st.code(латех, language="latex")
-                        if описание:
-                            st.caption(описание)
-                    st.markdown("---")
-
-                if переводить:
-                    with st.spinner("Перевод..."):
-                        перевод = перевести_на_русский(чистый[:1500])
-                    st.markdown(перевод)
-                    if len(чистый) > 1500:
-                        st.caption("Показан перевод первых 1500 символов фрагмента.")
-                else:
-                    усечённый = чистый[:900] + ("…" if len(чистый) > 900 else "")
-                    st.markdown(усечённый)
+            for i, фр in enumerate(фрагменты, 1):
+                показать_фрагмент_основания(i, фр, "diagnostic_fragment")
 
 with вкладка2:
-    дизайн.показать_кейсы(кейсы)
+    дизайн.показать_заголовок("Мои документы")
+
+    тетради = notebooks.list_notebooks(пользователь_id)
+    варианты_тетрадей = [т["id"] for т in тетради]
+    д1, д2 = st.columns([1.2, 1], gap="large")
+
+    with д1:
+        индекс_активной = 0
+        if варианты_тетрадей and st.session_state.get("активная_тетрадь_id") in варианты_тетрадей:
+            индекс_активной = варианты_тетрадей.index(st.session_state["активная_тетрадь_id"])
+        тетрадь_для_загрузки_id = st.selectbox(
+            "Выберите тетрадь",
+            options=варианты_тетрадей,
+            index=индекс_активной,
+            format_func=lambda notebook_id: notebooks.notebook_label(
+                next(т for т in тетради if т["id"] == notebook_id)
+            ),
+            key="документы_тетрадь",
+        ) if варианты_тетрадей else None
+        if тетрадь_для_загрузки_id:
+            st.session_state["активная_тетрадь_id"] = тетрадь_для_загрузки_id
+
+    with д2:
+        новая_тетрадь = st.text_input(
+            "Новая тетрадь",
+            placeholder="Например: Кинетика экзамен",
+            key="новая_тетрадь",
+        )
+        if st.button("Создать тетрадь", use_container_width=True):
+            try:
+                созданная = notebooks.create_notebook(новая_тетрадь, пользователь_id)
+                st.session_state["активная_тетрадь_id"] = созданная["id"]
+                st.success(f"Создана тетрадь «{созданная['title']}».")
+                st.rerun()
+            except Exception as ошибка:
+                st.error(str(ошибка))
+
+    выбранная_для_документов = notebooks.get_notebook(
+        st.session_state.get("активная_тетрадь_id"),
+        пользователь_id,
+    )
+
+    if выбранная_для_документов:
+        st.caption(
+            f"user_id: `{пользователь_id}` · notebook_id: `{выбранная_для_документов['id']}` · "
+            f"Qdrant collection: `{выбранная_для_документов['collection']}`"
+        )
+        загруженные = st.file_uploader(
+            "Перетащите файлы сюда",
+            type=["pdf", "docx", "txt", "md", "pptx"],
+            accept_multiple_files=True,
+            help="Каждая тетрадь пишется в отдельную коллекцию Qdrant и не смешивается с harvest-корпусом.",
+        )
+        if st.button("Загрузить в выбранную тетрадь", type="primary", use_container_width=True):
+            if not загруженные:
+                st.warning("Выберите один или несколько файлов.")
+            else:
+                uploads = [(ф.name, ф.getvalue()) for ф in загруженные]
+                try:
+                    with st.spinner("Извлекаю текст, режу на чанки и пишу в Qdrant..."):
+                        итог = notebooks.ingest_uploaded_files(
+                            загрузить_qdrant(),
+                            загрузить_модель(),
+                            выбранная_для_документов["id"],
+                            uploads,
+                            user_id=пользователь_id,
+                        )
+                    st.success(
+                        f"Добавлено файлов: {итог['added_files']}; "
+                        f"пропущено дублей: {итог['skipped_files']}; "
+                        f"чанков: {итог['chunks']}."
+                    )
+                    for ошибка in итог["errors"]:
+                        st.warning(ошибка)
+                    st.rerun()
+                except Exception as ошибка:
+                    st.error(f"Ошибка загрузки: {ошибка}")
+
+        свежая_тетрадь = notebooks.get_notebook(выбранная_для_документов["id"], пользователь_id)
+        число_точек = notebooks.collection_count(загрузить_qdrant(), свежая_тетрадь)
+        st.markdown(f"**В коллекции:** {число_точек} фрагмент(ов)")
+        файлы = свежая_тетрадь.get("files", [])
+        if not файлы:
+            st.info("В этой тетради пока нет документов.")
+        else:
+            for файл in файлы:
+                with st.expander(f"{файл['name']} · {файл.get('chunks', 0)} чанков"):
+                    st.markdown(f"**Тип:** {файл.get('type', '')}")
+                    st.markdown(f"**SHA-256:** `{файл.get('file_hash', '')[:16]}…`")
+                    st.markdown(f"**Путь:** `{файл.get('path', '')}`")
+                    st.caption(f"Загружен: {файл.get('uploaded_at', '')}")
 
 with вкладка3:
+    дизайн.показать_заголовок("Учебные фичи")
+
+    тетради_учёба = notebooks.list_notebooks(пользователь_id)
+    if not тетради_учёба:
+        st.info("Сначала создайте тетрадь и загрузите документы во вкладке «Мои документы».")
+    else:
+        варианты_учёба = [т["id"] for т in тетради_учёба]
+        индекс_учёба = 0
+        if st.session_state.get("активная_тетрадь_id") in варианты_учёба:
+            индекс_учёба = варианты_учёба.index(st.session_state["активная_тетрадь_id"])
+        учебная_тетрадь_id = st.selectbox(
+            "Тетрадь для учебных инструментов",
+            options=варианты_учёба,
+            index=индекс_учёба,
+            format_func=lambda notebook_id: notebooks.notebook_label(
+                next(т for т in тетради_учёба if т["id"] == notebook_id)
+            ),
+            key="учёба_тетрадь",
+        )
+        учебная_тетрадь = notebooks.get_notebook(учебная_тетрадь_id, пользователь_id)
+        документы_учёба = ["Все документы"] + notebooks.notebook_documents(учебная_тетрадь)
+        учебный_документ = st.selectbox(
+            "Документ / лекция",
+            options=документы_учёба,
+            key="учёба_документ",
+        )
+
+        if len(документы_учёба) == 1:
+            st.warning("В выбранной тетради пока нет загруженных документов.")
+
+        таб_конспект, таб_карточки, таб_квиз, таб_граф = st.tabs([
+            "Конспект", "Флешкарточки", "Квиз", "Майндмэп"
+        ])
+
+        with таб_конспект:
+            тема_конспекта = st.text_input(
+                "Глава или фокус",
+                placeholder="Например: глава 3, катализ, лекция 5",
+                key="тема_конспекта",
+            )
+            кн1, кн2 = st.columns(2, gap="small")
+            with кн1:
+                кнопка_вся_лекция = st.button("Тезисно всю лекцию", type="primary", use_container_width=True)
+            with кн2:
+                кнопка_глава = st.button("Конспект главы / темы", use_container_width=True)
+
+            if кнопка_вся_лекция or кнопка_глава:
+                фокус = "" if кнопка_вся_лекция else тема_конспекта
+                фрагменты_учёба = учебные_фрагменты(учебная_тетрадь, учебный_документ, фокус, лимит=18)
+                if not фрагменты_учёба:
+                    st.warning("В выбранной тетради нет фрагментов для конспекта.")
+                else:
+                    задача = (
+                        "Составь тезисный конспект всей выбранной лекции/документа. "
+                        "Структура: 1) ключевая идея, 2) тезисы, 3) термины, 4) формулы/методы если есть, 5) что стоит выучить."
+                        if кнопка_вся_лекция else
+                        f"Составь конспект по фокусу «{тема_конспекта}». Структура: ключевые тезисы, определения, методы, формулы если есть, вопросы для самопроверки."
+                    )
+                    with st.spinner("Генерирую конспект с citation..."):
+                        конспект = учебный_текстовый_ответ(задача, фрагменты_учёба)
+                    st.session_state["конспект_результат"] = {
+                        "ответ": конспект,
+                        "фрагменты": фрагменты_учёба,
+                        "заголовок": f"Конспект: {учебный_документ}",
+                    }
+
+            if st.session_state.get("конспект_результат"):
+                результат_конспект = st.session_state["конспект_результат"]
+                st.markdown(
+                    вставить_цитаты_в_ответ(
+                        результат_конспект["ответ"],
+                        результат_конспект["фрагменты"],
+                    ),
+                    unsafe_allow_html=True,
+                )
+                дизайн.показать_заголовок("Источники конспекта", отступ_сверху_rem=2)
+                дизайн.показать_источники_rag(результат_конспект["фрагменты"])
+                показать_скачивание_источников(результат_конспект["фрагменты"], "notes")
+                показать_экспорт_ответа(
+                    результат_конспект["заголовок"],
+                    результат_конспект["ответ"],
+                    результат_конспект["фрагменты"],
+                    "notes_export",
+                )
+
+        with таб_карточки:
+            тема_карточек = st.text_input(
+                "Тема для карточек",
+                placeholder="Например: уравнение Аррениуса, QSAR, катализ",
+                key="тема_карточек",
+            )
+            число_карточек = st.slider("Количество карточек", 5, 30, 12, key="число_карточек")
+            if st.button("Сгенерировать Anki-карточки", type="primary", use_container_width=True):
+                фрагменты_карточки = учебные_фрагменты(учебная_тетрадь, учебный_документ, тема_карточек, лимит=16)
+                if not фрагменты_карточки:
+                    st.warning("Нет фрагментов для карточек.")
+                else:
+                    задача = (
+                        f"Сгенерируй {число_карточек} флешкарточек Anki по теме «{тема_карточек or учебный_документ}». "
+                        "Формат JSON: {\"cards\":[{\"front\":\"вопрос\", \"back\":\"краткий ответ\", \"source\":\"[N]\"}]}. "
+                        "Вопросы должны проверять понимание, а не только определения."
+                    )
+                    with st.spinner("Генерирую карточки..."):
+                        данные = учебный_json_ответ(задача, фрагменты_карточки)
+                    карточки = данные.get("cards") or данные.get("items") or []
+                    имя_набора = тема_карточек or учебный_документ or учебная_тетрадь["title"]
+                    export_prefix = f"{учебная_тетрадь['title']}_{имя_набора}"
+                    package_id = f"{пользователь_id}:{учебная_тетрадь['id']}:{имя_набора}"
+                    экспорты_карточек = {}
+                    if карточки:
+                        экспорты_карточек = study_tools.save_flashcard_exports(
+                            карточки,
+                            f"Навигатор - {имя_набора}",
+                            Path("exports") / "anki" / пользователь_id / учебная_тетрадь["id"],
+                            prefix=export_prefix,
+                            package_id=package_id,
+                        )
+                    st.session_state["карточки_результат"] = {
+                        "cards": карточки,
+                        "фрагменты": фрагменты_карточки,
+                        "deck": f"Навигатор - {имя_набора}",
+                        "package_id": package_id,
+                        "export_prefix": export_prefix,
+                        "exports": экспорты_карточек,
+                    }
+
+            if st.session_state.get("карточки_результат"):
+                карточки_результат = st.session_state["карточки_результат"]
+                карточки = карточки_результат["cards"]
+                st.table([
+                    {
+                        "Вопрос": к.get("front") or к.get("question", ""),
+                        "Ответ": к.get("back") or к.get("answer", ""),
+                        "Источник": к.get("source", ""),
+                    }
+                    for к in карточки
+                ])
+                if карточки and not карточки_результат.get("exports"):
+                    карточки_результат["exports"] = study_tools.save_flashcard_exports(
+                        карточки,
+                        карточки_результат["deck"],
+                        Path("exports") / "anki" / пользователь_id / учебная_тетрадь["id"],
+                        prefix=карточки_результат.get("export_prefix") or карточки_результат["deck"],
+                        package_id=карточки_результат.get("package_id", ""),
+                    )
+                    st.session_state["карточки_результат"] = карточки_результат
+
+                экспорты_карточек = карточки_результат.get("exports") or {}
+                if экспорты_карточек.get("tsv_path"):
+                    st.caption(
+                        "Файлы сохранены локально на сервере приложения. "
+                        "Если in-app browser скачивает в профиль Default, берите файл по этому пути."
+                    )
+                    st.code(
+                        "\n".join(
+                            путь for путь in [
+                                экспорты_карточек.get("apkg_path"),
+                                экспорты_карточек.get("tsv_path"),
+                            ] if путь
+                        ),
+                        language="text",
+                    )
+
+                st.download_button(
+                    "Скачать TSV для импорта в Anki",
+                    data=экспорты_карточек.get("tsv_bytes") or study_tools.cards_to_tsv(карточки),
+                    file_name=Path(экспорты_карточек.get("tsv_path") or "navigator_flashcards.tsv").name,
+                    mime="text/tab-separated-values",
+                    key="flashcards_tsv",
+                    use_container_width=True,
+                )
+                apkg = экспорты_карточек.get("apkg_bytes")
+                if apkg:
+                    st.download_button(
+                        "Скачать .apkg для Anki",
+                        data=apkg,
+                        file_name=Path(экспорты_карточек.get("apkg_path") or "navigator_flashcards.apkg").name,
+                        mime="application/octet-stream",
+                        key="flashcards_apkg",
+                        use_container_width=True,
+                    )
+                else:
+                    st.warning("Для экспорта .apkg нужен пакет genanki. TSV уже можно импортировать в Anki.")
+
+        with таб_квиз:
+            тема_квиза = st.text_input(
+                "Тема квиза",
+                placeholder="Например: лекция 5, глава 3, молекулярные отпечатки",
+                key="тема_квиза",
+            )
+            число_вопросов = st.slider("Вопросов", 3, 15, 10, key="число_вопросов")
+            if st.button("Задать мне вопросы", type="primary", use_container_width=True):
+                фрагменты_квиз = учебные_фрагменты(учебная_тетрадь, учебный_документ, тема_квиза, лимит=18)
+                if not фрагменты_квиз:
+                    st.warning("Нет фрагментов для квиза.")
+                else:
+                    задача = (
+                        f"Составь квиз из {число_вопросов} вопросов по теме «{тема_квиза or учебный_документ}». "
+                        "Формат JSON: {\"questions\":[{\"id\":1,\"question\":\"...\", \"ideal_answer\":\"...\", \"source\":\"[N]\"}]}. "
+                        "Смешай определения, применение, причинно-следственные вопросы и короткие задачи."
+                    )
+                    with st.spinner("Готовлю вопросы..."):
+                        данные = учебный_json_ответ(задача, фрагменты_квиз)
+                    st.session_state["квиз_результат"] = {
+                        "questions": данные.get("questions") or данные.get("items") or [],
+                        "фрагменты": фрагменты_квиз,
+                    }
+
+            if st.session_state.get("квиз_результат"):
+                квиз = st.session_state["квиз_результат"]
+                вопросы = квиз["questions"]
+                with st.form("форма_квиза"):
+                    ответы = {}
+                    for вопрос in вопросы:
+                        qid = str(вопрос.get("id") or len(ответы) + 1)
+                        st.markdown(f"**{qid}. {вопрос.get('question', '')}** {вопрос.get('source', '')}")
+                        ответы[qid] = st.text_area("Ваш ответ", key=f"ответ_квиз_{qid}", height=90)
+                    проверить = st.form_submit_button("Проверить ответы")
+                if проверить:
+                    payload = {
+                        "questions": вопросы,
+                        "student_answers": ответы,
+                    }
+                    задача = (
+                        "Оцени ответы студента по 0-2 балла за каждый вопрос. "
+                        "Верни JSON: {\"total\":число,\"max_total\":число,\"results\":[{\"id\":...,\"score\":0,\"feedback\":\"...\",\"correct_answer\":\"...\"}]}.\n"
+                        + json.dumps(payload, ensure_ascii=False)
+                    )
+                    with st.spinner("Проверяю ответы..."):
+                        оценка = учебный_json_ответ(задача, квиз["фрагменты"], max_tokens=2200)
+                    st.session_state["оценка_квиза"] = оценка
+
+                if st.session_state.get("оценка_квиза"):
+                    оценка = st.session_state["оценка_квиза"]
+                    st.markdown(f"**Итог:** {оценка.get('total', 0)} / {оценка.get('max_total', len(вопросы) * 2)}")
+                    for item in оценка.get("results", []):
+                        with st.expander(f"Вопрос {item.get('id')} · {item.get('score')} балл(ов)"):
+                            st.markdown(item.get("feedback", ""))
+                            st.markdown("**Правильный ответ:** " + str(item.get("correct_answer", "")))
+
+        with таб_граф:
+            тема_графа = st.text_input(
+                "Фокус майндмэпа",
+                placeholder="Например: катализ, растворимость, GNN",
+                key="тема_графа",
+            )
+            if st.button("Построить граф связей", type="primary", use_container_width=True):
+                фрагменты_граф = учебные_фрагменты(учебная_тетрадь, учебный_документ, тема_графа, лимит=18)
+                if not фрагменты_граф:
+                    st.warning("Нет фрагментов для графа.")
+                else:
+                    задача = (
+                        "Извлеки 8-14 ключевых сущностей/терминов и связи между ними. "
+                        "Формат JSON: {\"nodes\":[{\"id\":\"term\",\"label\":\"термин\",\"theses\":[\"тезис [N]\"]}],"
+                        "\"edges\":[{\"source\":\"term1\",\"target\":\"term2\",\"label\":\"тип связи\"}]}. "
+                        "Тезисы должны ссылаться на [N]."
+                    )
+                    with st.spinner("Извлекаю сущности и связи..."):
+                        граф = учебный_json_ответ(задача, фрагменты_граф)
+                    st.session_state["граф_результат"] = {
+                        "graph": граф,
+                        "фрагменты": фрагменты_граф,
+                    }
+
+            if st.session_state.get("граф_результат"):
+                граф_результат = st.session_state["граф_результат"]
+                граф = граф_результат["graph"]
+                выбранный_узел = None
+                try:
+                    from streamlit_agraph import Config, Edge, Node, agraph
+
+                    nodes = [
+                        Node(
+                            id=str(node.get("id") or node.get("label")),
+                            label=str(node.get("label") or node.get("id")),
+                            size=24,
+                        )
+                        for node in граф.get("nodes", [])
+                    ]
+                    edges = [
+                        Edge(
+                            source=str(edge.get("source")),
+                            target=str(edge.get("target")),
+                            label=str(edge.get("label") or ""),
+                        )
+                        for edge in граф.get("edges", [])
+                    ]
+                    config = Config(
+                        width="100%",
+                        height=520,
+                        directed=False,
+                        physics=True,
+                        hierarchical=False,
+                    )
+                    выбранный_узел = agraph(nodes=nodes, edges=edges, config=config)
+                except Exception:
+                    try:
+                        st.graphviz_chart(study_tools.graphviz_dot(граф), use_container_width=True)
+                    except Exception:
+                        st.code(study_tools.graphviz_dot(граф), language="dot")
+                    варианты_узлов = [str(node.get("id") or node.get("label")) for node in граф.get("nodes", [])]
+                    if варианты_узлов:
+                        выбранный_узел = st.selectbox("Узел", варианты_узлов, key="выбранный_узел_графа")
+
+                if выбранный_узел:
+                    узел = next(
+                        (node for node in граф.get("nodes", [])
+                         if str(node.get("id") or node.get("label")) == str(выбранный_узел)),
+                        None,
+                    )
+                    if узел:
+                        st.markdown(f"**Связанные тезисы: {узел.get('label') or узел.get('id')}**")
+                        for тезис in узел.get("theses", []):
+                            st.markdown("- " + str(тезис))
+                показать_скачивание_источников(граф_результат["фрагменты"], "mindmap")
+
+with вкладка4:
+    дизайн.показать_кейсы(кейсы)
+
+with вкладка5:
     дизайн.показать_архитектуру()

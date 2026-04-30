@@ -5,6 +5,9 @@ pypdf
 pymupdf
 fastembed
 python-docx
+python-pptx
+genanki
+streamlit-agraph
 reportlab
 groq
 python-dotenv

@@ -127,7 +127,7 @@ code, pre, .mono {font-family: 'Geist Mono', monospace !important;}
 .source-row a.doc::after {content: " ↗"; color: var(--text-dim); font-size: 0.75rem; opacity: 0.6;}
 .source-row .pages {color: var(--text-dim); white-space: nowrap;}
 
-.cite {position: relative; display: inline; color: #93c5fd; cursor: help; font-weight: 500; padding: 0 3px; border-radius: 3px; transition: background 0.15s ease;}
+.cite {position: relative; display: inline; color: #93c5fd; cursor: pointer; font-weight: 500; padding: 0 3px; border-radius: 3px; transition: background 0.15s ease; text-decoration: none;}
 .cite:hover {background: rgba(147, 197, 253, 0.22); box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.4);}
 /* Тултип цитаты — position: fixed в правом нижнем углу viewport.
    Раньше был position: absolute привязанный к маркеру, но тогда:
@@ -616,23 +616,26 @@ def построить_источники_html(фрагменты):
         имя = фр["document"]
         стр = фр["page"]
         if имя not in группы:
-            группы[имя] = {"страницы": [], "маркеры": []}
+            группы[имя] = {"страницы": [], "маркеры": [], "url": фр.get("citation_url")}
             порядок.append(имя)
         if стр not in группы[имя]["страницы"]:
             группы[имя]["страницы"].append(стр)
         группы[имя]["маркеры"].append(номер_маркера)
+        if not группы[имя].get("url") and фр.get("citation_url"):
+            группы[имя]["url"] = фр.get("citation_url")
 
     строки = ""
     for док in порядок:
         страницы = ", ".join(str(p) for p in sorted(группы[док]["страницы"]))
         маркеры = ", ".join(str(n) for n in группы[док]["маркеры"])
         имя = красивое_имя_файла(док)
-        url = ссылка_на_scholar(док)
+        url = группы[док].get("url") or ссылка_на_scholar(док)
+        title = "Открыть документ" if группы[док].get("url") else "Открыть в Google Scholar"
         строки += (
             f'<div class="source-row">'
             f'<span class="num">[{маркеры}]</span>'
             f'<a class="doc" href="{url}" target="_blank" rel="noopener" '
-            f'title="Открыть в Google Scholar">{имя}</a>'
+            f'title="{title}">{имя}</a>'
             f'<span class="pages">стр. {страницы}</span>'
             f'</div>'
         )

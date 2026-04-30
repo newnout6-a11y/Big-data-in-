@@ -13,6 +13,7 @@ chunks_v2.jsonl
 # Сырые PDF (сотни МБ, не в репо)
 all_pdfs/
 rejected_pdfs/
+user_documents/
 
 # Метаданные harvester (генерируются автосбором)
 harvested_meta/
@@ -34,7 +35,9 @@ __pycache__/
 
 # Временные файлы runtime
 _tunnel*.log
+_streamlit*.log
 qr.png
+exports/anki/
 
 # IDE / OS
 .vscode/

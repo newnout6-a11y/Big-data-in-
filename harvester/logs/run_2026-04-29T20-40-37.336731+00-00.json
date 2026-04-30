@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-04-29T20:40:37.336731+00:00",
+  "args": {
+    "budget": 200,
+    "year_min": 2020,
+    "email": "you@example.com",
+    "sources": "arxiv,chemrxiv,openalex,europepmc,cyberleninka,stackexchange",
+    "time_limit_min": 60,
+    "skip_ingest": false,
+    "skip_embed": false
+  },
+  "steps": {
+    "harvest": {
+      "return_code": 120,
+      "seconds": 35228.5
+    }
+  },
+  "finished_at": "2026-04-30T06:27:45.842120+00:00"
+}
