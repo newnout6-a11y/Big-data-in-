@@ -12,6 +12,7 @@ chunks_v2.jsonl
 
 # Сырые PDF (сотни МБ, не в репо)
 all_pdfs/
+rejected_pdfs/
 
 # Метаданные harvester (генерируются автосбором)
 harvested_meta/

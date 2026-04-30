@@ -37,11 +37,13 @@ from классификатор import (
     классифицировать_батч,
     подготовить_прототипы,
 )
+import фильтр_качества
 
 
 _БАЗА = os.path.dirname(os.path.abspath(__file__))
 ПАПКА_PDF = os.path.join(_БАЗА, "all_pdfs")
 ПАПКА_МЕТА = os.path.join(_БАЗА, "harvested_meta")
+ПАПКА_ОТБРАКОВКА = os.path.join(_БАЗА, "rejected_pdfs")
 ФАЙЛ_ЧАНКОВ = os.path.join(_БАЗА, "chunks_v2.jsonl")
 
 РАЗМЕР_ЧАНКА = 800
@@ -193,6 +195,8 @@ def собрать_обработанные():
 def main(argv=None):
     парсер = argparse.ArgumentParser()
     парсер.add_argument("--full", action="store_true", help="Перезаписать chunks_v2.jsonl с нуля")
+    парсер.add_argument("--no-quality-filter", action="store_true",
+                        help="Не выкидывать низкокачественные PDF в rejected_pdfs/")
     args = парсер.parse_args(argv)
 
     if not os.path.isdir(ПАПКА_PDF):
@@ -219,6 +223,7 @@ def main(argv=None):
     метки, прототипы, _ = подготовить_прототипы(модель)
 
     счётчик_чанков = 0
+    отбракованных = 0
     хэши_в_сессии: set[str] = set()
     с_дедупом = 0
 
@@ -234,7 +239,23 @@ def main(argv=None):
                 страницы = извлечь_txt(путь)
             if not страницы:
                 print(f"  [{индекс}/{len(новые)}] ПРОПУЩЕН (нет текста): {имя}")
+                if not args.no_quality_filter and нижний.endswith(".pdf"):
+                    отбракованных += 1
+                    куда = фильтр_качества.отбраковать(путь, ПАПКА_ОТБРАКОВКА, "нет извлечённого текста")
+                    if куда:
+                        print(f"      → перемещён в {куда}")
                 continue
+
+            # Фильтр качества: отбрасываем низкокачественные PDF до ingest
+            if not args.no_quality_filter and нижний.endswith(".pdf"):
+                оценка = фильтр_качества.оценить(страницы)
+                if not оценка.принят:
+                    отбракованных += 1
+                    print(f"  [{индекс}/{len(новые)}] ОТБРАКОВАН ({оценка.причина}): {имя}")
+                    куда = фильтр_качества.отбраковать(путь, ПАПКА_ОТБРАКОВКА, оценка.причина)
+                    if куда:
+                        print(f"      → перемещён в {куда}")
+                    continue
 
             мета = прочитать_метадату(имя)
             doc_id = мета.get("doc_id") or f"local:{имя}"
@@ -294,6 +315,8 @@ def main(argv=None):
                 print(f"  [{индекс}/{len(новые)}] чанков добавлено всего: {счётчик_чанков}")
 
     print(f"\nГотово. Чанков добавлено: {счётчик_чанков}, дедупликаций: {с_дедупом}")
+    if отбракованных:
+        print(f"Отбраковано (low quality): {отбракованных} → {ПАПКА_ОТБРАКОВКА}/")
     print(f"Файл: {ФАЙЛ_ЧАНКОВ}")
     print("Дальше: python embed_resume_v2.py")
     return 0
