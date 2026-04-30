@@ -1,9 +1,11 @@
 name: harvest
 
-# Cron-харвестер: каждые 2 часа забирает свежие документы из arXiv, OpenAlex,
-# Europe PMC, Stack Exchange, Semantic Scholar (и опционально chemRxiv,
-# КиберЛенинка, CORE), ингестит их и пушит чанки в удалённый Qdrant.
-# Прогресс (cursor'ы и downloaded_ids) коммитится обратно в репо.
+# Cron-харвестер: по запросу (workflow_dispatch) забирает свежие документы из
+# arXiv, OpenAlex, Europe PMC, Stack Exchange, Semantic Scholar (и опционально
+# chemRxiv, КиберЛенинка, CORE), ингестит их и пушит чанки в удалённый Qdrant.
+#
+# Прогресс (state.json) НЕ коммитится обратно в репо — для сохранения
+# чекпоинта используется Google Drive (см. секреты GDRIVE_*) или S3.
 #
 # Требуемые секреты (Settings → Secrets and variables → Actions):
 #   QDRANT_URL       — URL Qdrant Cloud (обязательно)
@@ -11,7 +13,11 @@ name: harvest
 #   HARVESTER_EMAIL  — email для User-Agent OpenAlex и для Unpaywall fallback
 #   GROQ_API_KEY     — для Streamlit-приложения (не используется в cron'е)
 #
-# Опциональные:
+# Опциональные (Google Drive — рекомендуемый бэкап без git push):
+#   GDRIVE_FOLDER_ID         — ID папки в Drive (расшаренной на сервисный аккаунт)
+#   GDRIVE_CREDENTIALS_JSON  — содержимое JSON service-account ключа (одной строкой)
+#
+# Опциональные (CORE / S3):
 #   CORE_API_KEY     — ключ https://core.ac.uk/services/api для источника CORE
 #   S3_ENDPOINT_URL  — URL S3-совместимого хранилища (Cloud.ru / Sber Cloud)
 #   S3_BUCKET        — имя бакета
@@ -20,10 +26,9 @@ name: harvest
 #   S3_REGION        — регион (дефолт ru-moscow-1)
 #   S3_PREFIX        — префикс в бакете (дефолт пустой)
 # Если S3_BUCKET задан — после ingest+embed файлы синхронизируются в S3.
+# Если GDRIVE_FOLDER_ID задан — после ingest+embed файлы синхронизируются в Drive.
 
 on:
-  schedule:
-    - cron: "17 */2 * * *"
   workflow_dispatch:
     inputs:
       budget:
@@ -37,7 +42,7 @@ on:
         default: "2020"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: harvest
@@ -62,13 +67,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run harvest → ingest → embed → S3 (опц)
+      - name: Run harvest → ingest → embed → upload (опц)
         env:
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
           HARVESTER_EMAIL: ${{ secrets.HARVESTER_EMAIL }}
-          # Опциональные источники / S3 (если секрета нет — переменная пустая,
-          # соответствующий шаг внутри harvest_full просто пропустится)
+          # Опциональные источники / S3 / Google Drive (если секрета нет —
+          # переменная пустая, соответствующий шаг внутри harvest_full
+          # просто пропустится).
           CORE_API_KEY: ${{ secrets.CORE_API_KEY }}
           S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
@@ -76,6 +82,8 @@ jobs:
           S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
           S3_REGION: ${{ secrets.S3_REGION }}
           S3_PREFIX: ${{ secrets.S3_PREFIX }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          GDRIVE_CREDENTIALS_JSON: ${{ secrets.GDRIVE_CREDENTIALS_JSON }}
         run: |
           python -m harvester.harvest_full \
             --budget "${{ github.event.inputs.budget || '500' }}" \
@@ -95,15 +103,4 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
-      - name: Commit state.json + logs back
-        if: always()
-        run: |
-          git config user.name  "harvester-bot"
-          git config user.email "harvester-bot@users.noreply.github.com"
-          git add harvester/state.json harvester/logs/ || true
-          if ! git diff --cached --quiet; then
-            git commit -m "harvest: incremental update [skip ci]"
-            git push
-          else
-            echo "Нет изменений в state."
-          fi
+

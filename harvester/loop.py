@@ -119,7 +119,15 @@ def main(argv=None) -> int:
         print(f"[loop] S3 upload включён (bucket={os.getenv('S3_BUCKET')}) — "
               f"вызывается внутри harvest_full", flush=True)
     else:
-        print("[loop] S3 upload выключен (S3_BUCKET не задан — чисто локально)", flush=True)
+        print("[loop] S3 upload выключен (S3_BUCKET не задан)", flush=True)
+
+    if os.getenv("GDRIVE_FOLDER_ID"):
+        print(f"[loop] Google Drive upload включён "
+              f"(folder={os.getenv('GDRIVE_FOLDER_ID')}) — "
+              f"вызывается внутри harvest_full", flush=True)
+    else:
+        print("[loop] Google Drive upload выключен "
+              "(GDRIVE_FOLDER_ID не задан — чисто локально)", flush=True)
 
     # Сбрасываем флаг на случай повторного вызова main() в том же процессе
     # (напр. тесты или программный запуск). Иначе сигнал из прошлого вызова

@@ -1,1 +1,4 @@
 httpx>=0.27
+# Google Drive upload (опционально, нужно только если задан GDRIVE_FOLDER_ID).
+google-api-python-client>=2.100
+google-auth>=2.20

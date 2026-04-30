@@ -91,6 +91,15 @@ def main(argv=None):
         код4, дл4 = _запустить(команда_s3, окруж)
         отчёт["steps"]["s3_upload"] = {"return_code": код4, "seconds": round(дл4, 1)}
 
+    # Шаг 5 — Google Drive upload (опционально, только если задан GDRIVE_FOLDER_ID
+    # и любые креды). Заливает all_pdfs/ + harvested_meta/ + harvester/state.json.
+    if os.getenv("GDRIVE_FOLDER_ID") and time.time() < дедлайн:
+        команда_gd = [sys.executable, "-m", "harvester.gdrive_upload"]
+        код5, дл5 = _запустить(команда_gd, окруж)
+        отчёт["steps"]["gdrive_upload"] = {
+            "return_code": код5, "seconds": round(дл5, 1),
+        }
+
     отчёт["finished_at"] = datetime.now(timezone.utc).isoformat()
     путь_отчёта = os.path.join(ПАПКА_ЛОГОВ, f"run_{отчёт['started_at'].replace(':','-')}.json")
     with open(путь_отчёта, "w", encoding="utf-8") as f:
