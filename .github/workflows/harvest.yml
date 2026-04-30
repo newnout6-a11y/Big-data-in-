@@ -1,6 +1,6 @@
 name: harvest
 
-# Cron-харвестер: каждые 4 часа забирает свежие документы из arXiv, OpenAlex,
+# Cron-харвестер: каждые 2 часа забирает свежие документы из arXiv, OpenAlex,
 # Europe PMC, Stack Exchange, Semantic Scholar (и опционально chemRxiv,
 # КиберЛенинка, CORE), ингестит их и пушит чанки в удалённый Qdrant.
 # Прогресс (cursor'ы и downloaded_ids) коммитится обратно в репо.
@@ -23,7 +23,7 @@ name: harvest
 
 on:
   schedule:
-    - cron: "17 */4 * * *"
+    - cron: "17 */2 * * *"
   workflow_dispatch:
     inputs:
       budget:
