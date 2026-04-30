@@ -1,6 +1,12 @@
-"""Состояние харвестера: курсоры по источникам + список уже скачанных."""
+"""Состояние харвестера: курсоры по источникам + список уже скачанных.
+
+Кросс-источниковый дедуп: в поле `normalized_ids` хранятся нормализованные
+ключи (DOI или arxiv-id без версии). Один и тот же документ, пришедший из
+arxiv и openalex, получит одинаковый normalized_id и будет скачан один раз.
+"""
 import json
 import os
+import re
 import threading
 
 
@@ -14,7 +20,7 @@ _замок = threading.Lock()
 
 def _значения_по_умолчанию():
     return {
-        "version": 2,
+        "version": 3,
         "sources": {
             "arxiv": {"last_index": 0, "last_run": None},
             "chemrxiv": {"skip": 0, "last_run": None},
@@ -24,7 +30,74 @@ def _значения_по_умолчанию():
             "stackexchange": {"sites": {}, "last_run": None},
         },
         "downloaded_ids": [],
+        "normalized_ids": [],
     }
+
+
+# Регексы для нормализации doc_id → кросс-источниковый ключ.
+_RE_DOI = re.compile(r"10\.\d{4,9}/[^\s]+", re.IGNORECASE)
+_RE_ARXIV_OLD = re.compile(r"([a-z\-]+(?:\.[A-Z]{2})?/\d{7})", re.IGNORECASE)
+_RE_ARXIV_NEW = re.compile(r"(\d{4}\.\d{4,5})")
+
+
+def нормализовать_doc_id(doc_id: str) -> str:
+    """Возвращает канонический ключ для кросс-источникового дедупа.
+
+    Приоритет:
+      1. Если строка содержит DOI arxiv-алиаса (10.48550/arXiv.XXXX) → arxiv:XXXX.
+      2. Если содержит обычный DOI → doi:<lower, без версии>.
+      3. Если это arxiv:XXXX или openalex:10.48550/arxiv.XXXX → arxiv:XXXX (без vN).
+      4. Иначе — исходный doc_id как есть (lowercased).
+
+    Примеры:
+      нормализовать_doc_id("arxiv:2304.12345v2")       -> "arxiv:2304.12345"
+      нормализовать_doc_id("openalex:10.1038/s41586-023-12345") -> "doi:10.1038/s41586-023-12345"
+      нормализовать_doc_id("europepmc:10.1038/s41586-023-12345") -> "doi:10.1038/s41586-023-12345"
+      нормализовать_doc_id("europepmc:PMC1234567")     -> "europepmc:pmc1234567"
+      нормализовать_doc_id("se:stackoverflow:12345")   -> "se:stackoverflow:12345"
+    """
+    if not doc_id:
+        return ""
+
+    s = doc_id.strip()
+
+    # Отбросить префикс источника, если есть (мы узнаем источник из метадаты).
+    тело = s
+    if ":" in s:
+        префикс, _, остаток = s.partition(":")
+        if префикс.lower() in {"arxiv", "openalex", "europepmc", "chemrxiv", "cyberleninka", "doi"}:
+            тело = остаток.strip()
+
+    # 1. arxiv-алиас в виде DOI: 10.48550/arXiv.2304.12345
+    m = re.search(r"10\.48550/arxiv\.([^\s/v]+)", тело, re.IGNORECASE)
+    if m:
+        base = m.group(1).split("v")[0].rstrip(".")
+        return f"arxiv:{base.lower()}"
+
+    # 2. arxiv-id нового формата: 2304.12345(v2)
+    m = _RE_ARXIV_NEW.search(тело)
+    if m and "/" not in тело.split(m.group(1))[0][-10:]:
+        # убираем хвост версии
+        return f"arxiv:{m.group(1)}"
+
+    # 3. arxiv-id старого формата: cs.AI/0504001
+    m = _RE_ARXIV_OLD.match(тело)
+    if m:
+        return f"arxiv:{m.group(1).lower()}"
+
+    # 4. Обычный DOI
+    m = _RE_DOI.search(тело)
+    if m:
+        doi = m.group(0).lower().rstrip(".,;")
+        return f"doi:{doi}"
+
+    # 5. PMC-идентификатор
+    m = re.search(r"pmc\d+", тело, re.IGNORECASE)
+    if m:
+        return f"pmc:{m.group(0).lower()}"
+
+    # 6. Fallback — оригинальный doc_id в lowercase
+    return s.lower()
 
 
 def прочитать():
@@ -32,9 +105,19 @@ def прочитать():
         return _значения_по_умолчанию()
     try:
         with open(ФАЙЛ_СОСТОЯНИЯ, "r", encoding="utf-8") as f:
-            return json.load(f)
+            данные = json.load(f)
     except Exception:
         return _значения_по_умолчанию()
+
+    # Миграция со схемы v2 → v3: бэкфилл normalized_ids из downloaded_ids.
+    if "normalized_ids" not in данные:
+        данные["normalized_ids"] = []
+        for did in данные.get("downloaded_ids", []):
+            норм = нормализовать_doc_id(did)
+            if норм and норм not in данные["normalized_ids"]:
+                данные["normalized_ids"].append(норм)
+        данные["version"] = 3
+    return данные
 
 
 def сохранить(данные):
@@ -48,14 +131,29 @@ def сохранить(данные):
 
 
 def уже_скачан(состояние, doc_id):
-    return doc_id in set(состояние.get("downloaded_ids", []))
+    """True если документ уже скачан — проверяет и raw doc_id, и нормализованный ключ.
+
+    Это даёт кросс-источниковый дедуп: arxiv:2304.12345 и openalex:10.48550/arxiv.2304.12345
+    оба дадут normalized = arxiv:2304.12345, второй раз не скачается.
+    """
+    if doc_id in set(состояние.get("downloaded_ids", [])):
+        return True
+    норм = нормализовать_doc_id(doc_id)
+    if норм and норм in set(состояние.get("normalized_ids", [])):
+        return True
+    return False
 
 
 def пометить_скачанным(состояние, doc_id):
     if "downloaded_ids" not in состояние:
         состояние["downloaded_ids"] = []
+    if "normalized_ids" not in состояние:
+        состояние["normalized_ids"] = []
     if doc_id not in состояние["downloaded_ids"]:
         состояние["downloaded_ids"].append(doc_id)
+    норм = нормализовать_doc_id(doc_id)
+    if норм and норм not in состояние["normalized_ids"]:
+        состояние["normalized_ids"].append(норм)
 
 
 def залогировать(сообщение):
