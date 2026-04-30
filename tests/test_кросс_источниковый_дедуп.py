@@ -16,6 +16,12 @@ from harvester import state
     # arxiv-алиас в виде DOI (openalex его часто отдаёт)
     ("openalex:10.48550/arXiv.2304.12345",  "arxiv:2304.12345"),
     ("europepmc:10.48550/arxiv.2304.12345", "arxiv:2304.12345"),
+    # arxiv-алиас DOI с версией
+    ("openalex:10.48550/arXiv.2304.12345v2",  "arxiv:2304.12345"),
+    # arxiv-алиас DOI для старых ID со слэшем и заглавной V (регрессия:
+    # раньше [^\s/v] с IGNORECASE резал на cs.C и hep-ph)
+    ("openalex:10.48550/arXiv.cs.CV/0601001", "arxiv:cs.cv/0601001"),
+    ("openalex:10.48550/arXiv.hep-ph/0401001", "arxiv:hep-ph/0401001"),
     # обычный DOI в openalex/europepmc
     ("openalex:10.1038/s41586-023-12345",   "doi:10.1038/s41586-023-12345"),
     ("europepmc:10.1038/s41586-023-12345",  "doi:10.1038/s41586-023-12345"),

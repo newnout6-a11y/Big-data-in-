@@ -68,10 +68,12 @@ def нормализовать_doc_id(doc_id: str) -> str:
         if префикс.lower() in {"arxiv", "openalex", "europepmc", "chemrxiv", "cyberleninka", "doi"}:
             тело = остаток.strip()
 
-    # 1. arxiv-алиас в виде DOI: 10.48550/arXiv.2304.12345
-    m = re.search(r"10\.48550/arxiv\.([^\s/v]+)", тело, re.IGNORECASE)
+    # 1. arxiv-алиас в виде DOI: 10.48550/arXiv.2304.12345 или 10.48550/arXiv.cs.CV/0601001
+    # Важно: не исключаем '/' и 'v' из character class — они могут быть частью
+    # старых arxiv-идентификаторов (cs.CV/0601001). Версию снимаем регексом в конце.
+    m = re.search(r"10\.48550/arxiv\.([^\s]+)", тело, re.IGNORECASE)
     if m:
-        base = m.group(1).split("v")[0].rstrip(".")
+        base = re.sub(r"v\d+$", "", m.group(1), flags=re.IGNORECASE).rstrip(".")
         return f"arxiv:{base.lower()}"
 
     # 2. arxiv-id нового формата: 2304.12345(v2)

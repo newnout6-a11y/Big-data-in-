@@ -43,12 +43,17 @@ def найти_oa_pdf(
     except (httpx.HTTPError, ValueError):
         return None
 
-    # best_oa_location — рекомендованная Unpaywall лучшая OA-копия
+    # best_oa_location — рекомендованная Unpaywall лучшая OA-копия.
+    # По контракту Unpaywall, url_for_pdf — всегда прямая ссылка на PDF,
+    # так что доверяем ей как есть. Только url без -pdf фильтруем (это
+    # может быть HTML-страничка абстракта).
     best = data.get("best_oa_location") or {}
-    for field in ("url_for_pdf", "url"):
-        ссылка = best.get(field)
-        if ссылка and (ссылка.endswith(".pdf") or "pdf" in ссылка.lower()):
-            return ссылка
+    pdf_ссылка = best.get("url_for_pdf")
+    if pdf_ссылка:
+        return pdf_ссылка
+    обычная = best.get("url")
+    if обычная and (обычная.endswith(".pdf") or "pdf" in обычная.lower()):
+        return обычная
     # fallback — любая OA-копия с pdf
     for loc in data.get("oa_locations") or []:
         pdf = loc.get("url_for_pdf")
