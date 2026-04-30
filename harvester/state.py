@@ -20,7 +20,7 @@ _замок = threading.Lock()
 
 def _значения_по_умолчанию():
     return {
-        "version": 3,
+        "version": 4,
         "sources": {
             "arxiv": {"last_index": 0, "last_run": None},
             "chemrxiv": {"skip": 0, "last_run": None},
@@ -31,6 +31,8 @@ def _значения_по_умолчанию():
         },
         "downloaded_ids": [],
         "normalized_ids": [],
+        # v4: учёт доменов для балансировки (chem/it/other)
+        "domain_counts": {"chem": 0, "it": 0, "other": 0},
     }
 
 
@@ -117,6 +119,11 @@ def прочитать():
             if норм and норм not in данные["normalized_ids"]:
                 данные["normalized_ids"].append(норм)
         данные["version"] = 3
+    # Миграция v3 → v4: добавить пустые domain_counts (без ретро-классификации,
+    # она требует title/abstract которых нет в state.json — стартуем с нуля).
+    if "domain_counts" not in данные:
+        данные["domain_counts"] = {"chem": 0, "it": 0, "other": 0}
+        данные["version"] = 4
     return данные
 
 

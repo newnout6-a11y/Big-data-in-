@@ -89,7 +89,8 @@ def test_миграция_старого_state_без_normalized_ids(tmp_path, m
 
     прочитано = state.прочитать()
 
-    assert прочитано["version"] == 3
+    # v4+ — миграция добавила и normalized_ids, и domain_counts (следующий PR)
+    assert прочитано["version"] >= 3
     assert "normalized_ids" in прочитано
     assert "arxiv:2304.12345" in прочитано["normalized_ids"]
     assert "doi:10.1038/s41586-023-12345" in прочитано["normalized_ids"]

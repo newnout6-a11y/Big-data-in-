@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from . import state
+from . import домены
 from .sources import (
     arxiv, chemrxiv, openalex, europepmc, cyberleninka, stackexchange,
     semantic_scholar, core_api, unpaywall,
@@ -216,6 +217,11 @@ def обработать_документ(док, состояние, клиен
     os.makedirs(ПАПКА_PDF, exist_ok=True)
     with open(путь, "wb") as f:
         f.write(данные)
+    # Классификация домена — для балансировки и для ingest-фильтров
+    домен = домены.классифицировать(
+        источник=док.источник, название=док.название,
+        abstract=док.abstract, doc_id=док.doc_id,
+    )
     _сохранить_метадату(имя, {
         "doc_id": док.doc_id,
         "источник": док.источник,
@@ -223,13 +229,17 @@ def обработать_документ(док, состояние, клиен
         "авторы": док.авторы,
         "дата": док.дата,
         "категории": док.категории,
+        "домен": домен,
         "abstract": док.abstract[:500],
         "pdf_url": док.pdf_url,
         "файл": имя,
     })
     state.пометить_скачанным(состояние, док.doc_id)
+    # Инкремент счётчика домена — для последующих балансировочных коэффициентов
+    dc = состояние.setdefault("domain_counts", {"chem": 0, "it": 0, "other": 0})
+    dc[домен] = dc.get(домен, 0) + 1
     state.залогировать(f"OK {док.doc_id} -> {имя}")
-    _печать(f"[{док.источник}] OK   {имя} ({len(данные)//1024} КБ)")
+    _печать(f"[{док.источник}] OK   {имя} ({len(данные)//1024} КБ, домен: {домен})")
     return True
 
 
@@ -452,7 +462,24 @@ def запустить(args):
         },
     )
 
-    бюджет_per = max(1, args.budget // len(источники))
+    # Топик-балансировка: считаем мультипликаторы бюджета исходя из текущего
+    # распределения доменов в state. Если chem отстаёт — chem-источники получают
+    # бюджет больше, it-источники меньше. При пустом state все по 1.0.
+    counts = состояние.get("domain_counts", {})
+    коэф_домен = домены.рассчитать_коэффициенты(counts)
+    print(f"[balance] счётчики {counts} → коэф {коэф_домен}")
+
+    базовый = max(1, args.budget // len(источники))
+    весы: list[float] = []
+    for и in источники:
+        ожидаемый = домены.ИСТОЧНИК_ОЖИДАЕМЫЙ_ДОМЕН.get(и, "other")
+        весы.append(коэф_домен.get(ожидаемый, 1.0))
+    сумма_весов = sum(весы) or 1.0
+    бюджеты_per: dict[str, int] = {}
+    общий = args.budget
+    for и, в in zip(источники, весы):
+        бюджеты_per[и] = max(1, int(общий * в / сумма_весов))
+
     итог = 0
     дедлайн = time.time() + args.time_limit_min * 60 if args.time_limit_min else None
 
@@ -461,9 +488,9 @@ def запустить(args):
             print(f"Достигнут лимит времени, остановка перед {и}")
             break
         try:
-            n = СБОРЩИКИ[и](args, состояние, клиент_pdf, бюджет_per)
+            n = СБОРЩИКИ[и](args, состояние, клиент_pdf, бюджеты_per[и])
             итог += n
-            print(f"  → {и}: скачано {n}")
+            print(f"  → {и}: скачано {n} (бюджет {бюджеты_per[и]})")
         except Exception as e:
             print(f"  → {и}: ОШИБКА {type(e).__name__}: {e}")
             state.залогировать(f"ERR {и} {type(e).__name__}: {e}")
