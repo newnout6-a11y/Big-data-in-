@@ -70,6 +70,8 @@ def собрать(
     собрано: list[Документ] = []
     текущий_offset = offset
     страница = 0
+    max_429_retries = 3
+    retries_429 = 0
 
     # CORE позволяет уточнить выборку: fullText=true → есть PDF.
     q_parts = [запрос, "_exists_:fullText"]
@@ -88,8 +90,14 @@ def собрать(
             try:
                 ответ = клиент.get(БАЗА, params=params)
                 if ответ.status_code == 429:
+                    # Дневная квота CORE = 1000 req/day, так что выходим после
+                    # N ретраев, чтобы не крутиться бесконечно.
+                    if retries_429 >= max_429_retries:
+                        break
+                    retries_429 += 1
                     time.sleep(10)
                     continue
+                retries_429 = 0
                 ответ.raise_for_status()
             except httpx.HTTPError:
                 time.sleep(2)
