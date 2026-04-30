@@ -92,3 +92,44 @@ def test_state_миграция_добавляет_domain_counts(tmp_path, monke
     прочитано = state.прочитать()
     assert прочитано["version"] == 4
     assert прочитано["domain_counts"] == {"chem": 0, "it": 0, "other": 0}
+
+
+# ---------- регрессия: text-only путь классифицирует домен ----------
+
+def test_text_only_путь_классифицирует_домен(tmp_path, monkeypatch):
+    """Stack Exchange (текст без pdf_url) должен инкрементить domain_counts['it'],
+    иначе балансировщик даёт IT-источникам лишний буст."""
+    from harvester import run
+    from harvester.sources.arxiv import Документ
+
+    # Подменяем папки на временные
+    monkeypatch.setattr(run, "ПАПКА_PDF", str(tmp_path / "all_pdfs"))
+    monkeypatch.setattr(run, "ПАПКА_МЕТА", str(tmp_path / "harvested_meta"))
+    monkeypatch.setattr(run, "state", state)
+    monkeypatch.setattr(state, "ФАЙЛ_СОСТОЯНИЯ", str(tmp_path / "state.json"))
+    monkeypatch.setattr(state, "ФАЙЛ_ЛОГА", str(tmp_path / "log.txt"))
+
+    состояние = state.прочитать()
+    assert состояние["domain_counts"]["it"] == 0
+
+    док = Документ(
+        doc_id="se:stackoverflow:12345",
+        источник="stackexchange",
+        название="How to type-hint dict in Python 3.8",
+        авторы="user123",
+        дата="2024-01-01",
+        категории=["stackoverflow"],
+        abstract="I want to annotate a function taking dict as argument. "
+                 "Mypy complains about Dict vs dict. What's the canonical way?",
+        pdf_url="",
+    )
+
+    ok = run.обработать_документ(док, состояние, клиент_pdf=None)
+    assert ok is True
+    assert состояние["domain_counts"]["it"] == 1
+    # Метадата должна содержать ключ "домен"
+    import json, os
+    meta_файлы = os.listdir(str(tmp_path / "harvested_meta"))
+    assert len(meta_файлы) == 1
+    meta = json.loads((tmp_path / "harvested_meta" / meta_файлы[0]).read_text(encoding="utf-8"))
+    assert meta["домен"] == "it"

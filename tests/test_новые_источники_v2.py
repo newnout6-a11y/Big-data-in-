@@ -166,6 +166,23 @@ def test_unpaywall_404_возвращает_None():
     assert url is None
 
 
+def test_unpaywall_url_for_pdf_без_подстроки_pdf_тоже_возвращается():
+    """Регрессия: по контракту Unpaywall url_for_pdf — всегда PDF,
+    даже если в URL нет подстроки «pdf» (например, CDN-ссылка)."""
+    мок_ответ = MagicMock()
+    мок_ответ.status_code = 200
+    мок_ответ.raise_for_status = MagicMock()
+    мок_ответ.json.return_value = {
+        "best_oa_location": {
+            "url_for_pdf": "https://s3.amazonaws.com/jor/fulltext/abc123",
+            "url": "https://journal.example.org/article/abc123"
+        }
+    }
+    with patch("harvester.sources.unpaywall.httpx.get", return_value=мок_ответ):
+        url = unpaywall.найти_oa_pdf("10.1234/x", email="me@example.com")
+    assert url == "https://s3.amazonaws.com/jor/fulltext/abc123"
+
+
 # ---------- run.py helpers ----------
 
 def test_извлечь_doi_из_doc_id():
