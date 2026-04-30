@@ -59,6 +59,15 @@ def main(argv=None):
 
     дедлайн = time.time() + args.time_limit_min * 60
 
+    # Шаг 0 — подтянуть state.json из Drive (если rclone настроен).
+    # Делается до харвеста, чтобы свежий runner начал с актуального чекпоинта.
+    if os.getenv("GDRIVE_REMOTE") or os.getenv("RCLONE_CONFIG"):
+        команда_pull = [sys.executable, "-m", "harvester.gdrive_rclone", "pull-state"]
+        код0, дл0 = _запустить(команда_pull, окруж)
+        отчёт["steps"]["gdrive_pull_state"] = {
+            "return_code": код0, "seconds": round(дл0, 1),
+        }
+
     # Шаг 1 — харвестинг
     лимит = max(1, int((дедлайн - time.time()) / 60 * 0.5))
     команда_harvest = [
@@ -90,6 +99,16 @@ def main(argv=None):
         команда_s3 = [sys.executable, "-m", "harvester.s3_upload"]
         код4, дл4 = _запустить(команда_s3, окруж)
         отчёт["steps"]["s3_upload"] = {"return_code": код4, "seconds": round(дл4, 1)}
+
+    # Шаг 5 — Google Drive push через rclone (если задан GDRIVE_REMOTE
+    # или указан путь к rclone.conf через RCLONE_CONFIG).
+    # Заливает all_pdfs/ (по типам) + harvested_meta/ + harvester/state.json.
+    if (os.getenv("GDRIVE_REMOTE") or os.getenv("RCLONE_CONFIG")) and time.time() < дедлайн:
+        команда_push = [sys.executable, "-m", "harvester.gdrive_rclone", "push"]
+        код5, дл5 = _запустить(команда_push, окруж)
+        отчёт["steps"]["gdrive_push"] = {
+            "return_code": код5, "seconds": round(дл5, 1),
+        }
 
     отчёт["finished_at"] = datetime.now(timezone.utc).isoformat()
     путь_отчёта = os.path.join(ПАПКА_ЛОГОВ, f"run_{отчёт['started_at'].replace(':','-')}.json")
