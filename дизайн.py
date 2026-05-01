@@ -766,7 +766,7 @@ def показать_статистику():
         f"</div>"
         for v, l in _stats
     )
-    итоговый_html = (
+    html = (
         f"<div style='display:flex;justify-content:center;align-items:center;"
         f"gap:clamp(2rem,6vw,5rem);padding:3.5rem 0 2rem 0;flex-wrap:wrap'>"
         f"{_items}</div>"
