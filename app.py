@@ -1812,13 +1812,23 @@ with вкладка3:
                         f"<li style='margin-bottom:5px;line-height:1.55;color:#a3a3a3'>{_t}</li>"
                         for _t in _theses
                     ) if _theses else "<li style='color:#525252;font-style:italic'>тезисы не извлечены</li>"
+                    _degree_badge = (
+                        '<span style="background:#2563eb;color:#fff;border-radius:50%;width:18px;'
+                        'height:18px;display:inline-flex;align-items:center;justify-content:center;'
+                        'font-size:0.65rem;font-weight:700;margin-left:7px;vertical-align:middle">'
+                        + str(_deg) + '</span>'
+                    ) if _deg > 0 else ""
+                    _connections_block = (
+                        '<div style="margin-bottom:0.55rem;line-height:1.8">'
+                        + _conn_html + '</div>'
+                    ) if _conn_html else ""
                     _card = (
                         f"<div class='{_card_class}'>"
                         f"<div style='font-weight:600;font-size:0.95rem;color:#f0f0f0;margin-bottom:0.55rem'>"
                         f"{_nlabel}"
-                        f"{'<span style=\"background:#2563eb;color:#fff;border-radius:50%;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;font-size:0.65rem;font-weight:700;margin-left:7px;vertical-align:middle\">' + str(_deg) + '</span>' if _deg > 0 else ''}"
+                        f"{_degree_badge}"
                         f"</div>"
-                        f"{'<div style=\"margin-bottom:0.55rem;line-height:1.8\">' + _conn_html + '</div>' if _conn_html else ''}"
+                        f"{_connections_block}"
                         f"<ul style='margin:0;padding-left:1.1rem;font-size:0.85rem'>{_li_html}</ul>"
                         f"</div>"
                     )
