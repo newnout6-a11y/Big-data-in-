@@ -296,9 +296,14 @@ def _собрать_chemrxiv(args, состояние, клиент_pdf, бюд�
 
 
 def _собрать_openalex(args, состояние, клиент_pdf, бюджет):
-    if not args.email:
-        print("[openalex] пропущено: задай --email или ENV HARVESTER_EMAIL")
-        return 0
+    # OpenAlex не требует email обязательно — просто без него
+    # попадаешь в polite-pool ниже (~10 req/s vs ~100). Раньше без email
+    # источник полностью пропускался — из-за этого в CI не было ничего из
+    # OpenAlex, хотя формально работать он должен был. Сляпаем подписью
+    # анонимного bot'а.
+    email = args.email or ""
+    if not email:
+        print("[openalex] HARVESTER_EMAIL не задан — запросы без mailto (anonymous pool)")
     скачано = 0
     на_концепт = max(1, бюджет // len(openalex.КОНЦЕПТЫ_ПО_УМОЛЧАНИЮ))
     for концепт_ид, имя in openalex.КОНЦЕПТЫ_ПО_УМОЛЧАНИЮ.items():
@@ -306,7 +311,7 @@ def _собрать_openalex(args, состояние, клиент_pdf, бюд�
         print(f"[openalex/{имя}] бюджет {на_концепт}, cursor {cursor[:24]}…")
         доки, новый = openalex.собрать(
             концепт=концепт_ид, cursor=cursor, бюджет=на_концепт,
-            год_не_раньше=args.year_min, email=args.email,
+            год_не_раньше=args.year_min, email=email,
         )
         for док in доки:
             if обработать_документ(док, состояние, клиент_pdf):
