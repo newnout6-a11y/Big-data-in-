@@ -40,7 +40,7 @@ def main(argv=None):
     парсер.add_argument("--budget", type=int, default=300)
     парсер.add_argument("--year-min", type=int, default=2020)
     парсер.add_argument("--email", type=str, default=os.getenv("HARVESTER_EMAIL", ""))
-    парсер.add_argument("--sources", type=str, default="arxiv,openalex,europepmc,stackexchange")
+    парсер.add_argument("--sources", type=str, default="arxiv,openalex,europepmc,stackexchange,semanticscholar,chemrxiv")
     парсер.add_argument("--time-limit-min", type=int, default=300, help="Полный лимит на пайплайн")
     парсер.add_argument("--skip-ingest", action="store_true")
     парсер.add_argument("--skip-embed", action="store_true")
