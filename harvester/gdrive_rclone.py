@@ -10,6 +10,7 @@
     docx/     — *.docx из all_pdfs/
     txt/      — *.txt из all_pdfs/ (StackExchange Q+A и т. п.)
     meta/     — JSON-метаданные из harvested_meta/
+    images/   — картинки из PDF, извлечённые в extracted_images/
     state/    — state.json (чекпоинт парсера)
 
 По умолчанию: remote=`gdrive`, base=`big-data`. Меняется через env
@@ -47,6 +48,7 @@ _МАРШРУТЫ = (
     ("all_pdfs", "docx", "*.docx"),
     ("all_pdfs", "txt", "*.txt"),
     ("harvested_meta", "meta", None),  # без фильтра — все файлы
+    ("extracted_images", "images", None),
 )
 
 

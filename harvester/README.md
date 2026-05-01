@@ -51,7 +51,7 @@ python -m harvester.loop --budget 500
 
 `harvester.loop` бесконечно крутит `harvest_full`. До парсинга — pull
 свежего state.json из Drive, после ingest+embed — push новых
-PDF/DOCX/TXT/meta + state.json в Drive.
+PDF/DOCX/TXT/meta + extracted_images + state.json в Drive.
 
 Полный гайд: [`документация/GOOGLE_DRIVE.md`](../документация/GOOGLE_DRIVE.md).
 

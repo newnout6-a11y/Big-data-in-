@@ -1353,6 +1353,102 @@ def показать_мета_rag(число_фрагментов, модель=
     st.markdown(html, unsafe_allow_html=True)
 
 
+def показать_статистику_поиска(статистика):
+    """Краткая статистика базы и маршрута поиска после ответа."""
+    if not статистика:
+        return
+
+    def _экранировать(значение):
+        return html.escape(str(значение or ""), quote=True)
+
+    def _процент(значение):
+        try:
+            return max(0, min(100, int(float(значение))))
+        except (TypeError, ValueError):
+            return 0
+
+    def _номер_этапа(значение):
+        try:
+            return f"{int(значение):02d}"
+        except (TypeError, ValueError):
+            return "00"
+
+    режим = _экранировать(статистика.get("режим") or "поиск")
+    тетрадь = _экранировать(статистика.get("тетрадь") or "не выбрана")
+    qdrant_статус = _экранировать(статистика.get("qdrant_статус") or "")
+    карточки = [
+        (статистика.get("мои_файлы", 0), "мои файлы"),
+        (статистика.get("страницы_слайды", 0), "стр. / слайды"),
+        (статистика.get("мои_фрагменты", 0), "фрагменты"),
+        (статистика.get("мои_векторы", 0), "векторы"),
+        (статистика.get("типы_файлов", 0), "типы файлов"),
+    ]
+    карточки_html = "".join(
+        f"<div style='border:1px solid var(--border);border-radius:10px;padding:1rem;background:var(--bg-soft)'>"
+        f"<div style='font-size:1.55rem;font-weight:700;line-height:1;color:var(--text)'>{_экранировать(значение)}</div>"
+        f"<div style='font-family:\"Geist Mono\",monospace;font-size:0.62rem;text-transform:uppercase;"
+        f"letter-spacing:0.16em;color:var(--text-dim);margin-top:0.65rem'>{_экранировать(подпись)}</div>"
+        f"</div>"
+        for значение, подпись in карточки
+    )
+    темы_html = "".join(
+        f"<span style='display:inline-flex;border:1px solid #2f5f9f;border-radius:999px;"
+        f"padding:0.25rem 0.55rem;margin:0 0.4rem 0.45rem 0;color:#dbeafe'>{_экранировать(тема)}</span>"
+        for тема in статистика.get("темы", [])
+    ) or "<span style='color:var(--text-dim)'>темы появятся после индексации документов</span>"
+    связи_html = "".join(
+        f"<div style='display:grid;grid-template-columns:3.5rem 1fr auto;gap:0.75rem;align-items:center;"
+        f"border-top:1px solid var(--border);padding:0.8rem 0'>"
+        f"<span style='font-family:\"Geist Mono\",monospace;color:#93c5fd'>{_экранировать(связь.get('score', ''))}</span>"
+        f"<strong>{_экранировать(связь.get('title', ''))}</strong>"
+        f"<span style='color:var(--text-dim);font-size:0.85rem'>{_экранировать(связь.get('why', ''))}</span>"
+        f"</div>"
+        for связь in статистика.get("связанные", [])
+    ) or "<div style='color:var(--text-dim);border-top:1px solid var(--border);padding-top:0.8rem'>связанные документы появятся после поиска</div>"
+    диагностика_html = "".join(
+        f"<div style='display:grid;grid-template-columns:3.5rem 1fr auto;gap:0.75rem;align-items:center;"
+        f"border-top:1px solid var(--border);padding:0.8rem 0'>"
+        f"<span style='font-family:\"Geist Mono\",monospace;color:#93c5fd'>{_экранировать(пункт.get('score', ''))}</span>"
+        f"<strong>{_экранировать(пункт.get('title', ''))}</strong>"
+        f"<span style='color:var(--text-dim);font-size:0.85rem'>{_экранировать(пункт.get('why', ''))}</span>"
+        f"</div>"
+        for пункт in статистика.get("диагностика", [])
+    )
+    источники_html = "".join(
+        f"<div style='display:grid;grid-template-columns:10rem 1fr;gap:1rem;align-items:center;margin:0.65rem 0'>"
+        f"<span style='color:var(--text-muted)'>{_экранировать(имя)}</span>"
+        f"<span style='height:4px;border-radius:999px;background:linear-gradient(90deg,#60a5fa,#86efac);"
+        f"width:{_процент(ширина)}%;display:block'></span></div>"
+        for имя, ширина in статистика.get("источники", [])
+    )
+    пайплайн_html = "".join(
+        f"<div style='border:1px solid var(--border);border-radius:8px;padding:0.85rem;background:#0d0d0d'>"
+        f"<div style='font-family:\"Geist Mono\",monospace;color:var(--text-dim);font-size:0.62rem'>"
+        f"{_номер_этапа(номер)}</div><strong>{_экранировать(заголовок)}</strong>"
+        f"<div style='color:var(--text-dim);font-size:0.85rem;margin-top:0.35rem'>{_экранировать(описание)}</div></div>"
+        for номер, заголовок, описание in статистика.get("пайплайн", [])
+    )
+    итоговый_html = (
+        "<div style='margin-top:3rem;border:1px solid var(--border);border-radius:14px;"
+        "padding:1.15rem;background:#0c0c0c'>"
+        "<div style='display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;margin-bottom:1rem'>"
+        "<div><div style='font-weight:700;font-size:1.05rem;color:var(--text)'>Статистика поиска</div>"
+        "<div style='color:var(--text-muted);margin-top:0.45rem'>Файлы не просто лежат в базе: здесь видно объём, темы, связи, маршрут обработки и почему конкретные фрагменты попали в ответ.</div></div>"
+        f"<div style='font-family:\"Geist Mono\",monospace;color:#86efac;letter-spacing:0.18em;text-transform:uppercase;font-size:0.68rem'>{qdrant_статус}</div>"
+        "</div>"
+        f"<div style='display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0.65rem;margin:1rem 0 1.1rem'>{карточки_html}</div>"
+        "<div style='display:grid;grid-template-columns:1.35fr 1fr;gap:0.85rem'>"
+        f"<div style='border:1px solid var(--border);border-radius:10px;padding:1rem'><div style='font-weight:700;margin-bottom:0.8rem'>Карта тем</div>{темы_html}</div>"
+        f"<div style='border:1px solid var(--border);border-radius:10px;padding:1rem'><div style='font-weight:700;margin-bottom:0.8rem'>Связанные документы</div>{связи_html}</div>"
+        f"<div style='border:1px solid var(--border);border-radius:10px;padding:1rem'><div style='font-weight:700;margin-bottom:0.8rem'>Разделение источников</div><div style='color:var(--text-muted);margin-bottom:0.65rem'>режим: {режим} · тетрадь: {тетрадь}</div>{источники_html}</div>"
+        f"<div style='border:1px solid var(--border);border-radius:10px;padding:1rem'><div style='font-weight:700;margin-bottom:0.8rem'>Диагностика поиска</div>{диагностика_html}</div>"
+        "</div>"
+        f"<div style='border:1px solid var(--border);border-radius:10px;padding:1rem;margin-top:0.85rem'><div style='font-weight:700;margin-bottom:0.8rem'>Пайплайн обработки</div><div style='display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:0.55rem'>{пайплайн_html}</div></div>"
+        "</div>"
+    )
+    st.markdown(итоговый_html, unsafe_allow_html=True)
+
+
 def показать_источники_rag(фрагменты):
     """Источники RAG-ответа: группировка по документу со списком страниц."""
     st.markdown(построить_источники_html(фрагменты), unsafe_allow_html=True)

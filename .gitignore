@@ -14,6 +14,10 @@ chunks_v2.jsonl
 all_pdfs/
 rejected_pdfs/
 user_documents/
+extracted_images/
+
+# Кэш визуальной обработки тетрадей (рендеры, OCR, captions, бюджет Groq Vision)
+visual_index/
 
 # Метаданные harvester (генерируются автосбором)
 harvested_meta/

@@ -102,7 +102,7 @@ def main(argv=None):
 
     # Шаг 5 — Google Drive push через rclone (если задан GDRIVE_REMOTE
     # или указан путь к rclone.conf через RCLONE_CONFIG).
-    # Заливает all_pdfs/ (по типам) + harvested_meta/ + harvester/state.json.
+    # Заливает all_pdfs/, harvested_meta/, extracted_images/ и state.json.
     if (os.getenv("GDRIVE_REMOTE") or os.getenv("RCLONE_CONFIG")) and time.time() < дедлайн:
         команда_push = [sys.executable, "-m", "harvester.gdrive_rclone", "push"]
         код5, дл5 = _запустить(команда_push, окруж)
