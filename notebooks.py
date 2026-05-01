@@ -7,7 +7,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import docx
 import pypdf
@@ -20,6 +20,8 @@ from qdrant_client.models import (
     PointStruct,
     VectorParams,
 )
+
+import визуальная_обработка as виз
 
 try:
     import fitz
@@ -134,6 +136,10 @@ def ingest_uploaded_files(
     uploads: list[tuple[str, bytes]],
     *,
     user_id: str | None = None,
+    visual_mode: bool = False,
+    use_groq_vision: bool = False,
+    max_groq_pages_per_file: int = виз.MAX_GROQ_PAGES_DEFAULT,
+    on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     user_id = user_id or get_user_id()
     store = load_store(user_id)
@@ -144,8 +150,13 @@ def ingest_uploaded_files(
 
     ensure_collection(client, notebook)
 
-    summary = {"added_files": 0, "skipped_files": 0, "chunks": 0, "errors": []}
+    summary = {
+        "added_files": 0, "skipped_files": 0, "chunks": 0,
+        "groq_vision_pages": 0, "ocr_pages": 0, "errors": [],
+    }
     known_hashes = {f.get("file_hash") for f in notebook.get("files", [])}
+
+    groq_key = виз._first_groq_key() if use_groq_vision else ""
 
     for filename, data in uploads:
         safe_name = sanitize_filename(filename)
@@ -164,7 +175,27 @@ def ingest_uploaded_files(
         target.write_bytes(data)
 
         try:
-            pages = extract_pages(target)
+            if visual_mode and ext == ".pdf":
+                if on_progress:
+                    on_progress(f"{filename}: визуальная обработка...")
+                visual_pages = виз.обработать_pdf(
+                    target,
+                    use_groq_vision=use_groq_vision,
+                    groq_api_key=groq_key,
+                    max_groq_pages=max_groq_pages_per_file,
+                    save_images=True,
+                    on_progress=on_progress,
+                )
+                pages = [{"page": p["page"], "text": p["text"]} for p in visual_pages]
+                visual_meta_by_page = {p["page"]: p for p in visual_pages}
+                summary["ocr_pages"] += sum(
+                    1 for p in visual_pages if p.get("tier_used") == 1)
+                summary["groq_vision_pages"] += sum(
+                    1 for p in visual_pages if p.get("tier_used") == 2)
+            else:
+                pages = extract_pages(target)
+                visual_meta_by_page = {}
+
             chunks = build_chunks(
                 pages,
                 notebook=notebook,
@@ -172,6 +203,7 @@ def ingest_uploaded_files(
                 file_hash=file_hash,
                 file_path=target,
                 original_name=safe_name,
+                visual_meta_by_page=visual_meta_by_page,
             )
             if not chunks:
                 summary["errors"].append(f"{filename}: не удалось извлечь текст")
@@ -188,6 +220,7 @@ def ingest_uploaded_files(
             "type": ext.lstrip("."),
             "chunks": len(chunks),
             "uploaded_at": _now_iso(),
+            "visual_mode": bool(visual_mode and ext == ".pdf"),
         })
         known_hashes.add(file_hash)
         summary["added_files"] += 1
@@ -335,14 +368,17 @@ def build_chunks(
     file_hash: str,
     file_path: Path,
     original_name: str,
+    visual_meta_by_page: dict[int, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     chunks: list[dict[str, Any]] = []
     ext = file_path.suffix.lower().lstrip(".")
+    visual_meta_by_page = visual_meta_by_page or {}
     for page in pages:
         page_no = page["page"]
         text = clean_text(page["text"])
         if len(text) < 50:
             continue
+        meta = visual_meta_by_page.get(page_no, {})
         for chunk_index, chunk_text in enumerate(_split_text(text), 1):
             text_hash = hashlib.sha1(chunk_text.encode("utf-8", errors="ignore")).hexdigest()
             chunks.append({
@@ -360,6 +396,11 @@ def build_chunks(
                 "title": original_name,
                 "text_hash": text_hash,
                 "uploaded_at": _now_iso(),
+                "tier_used": meta.get("tier_used", 0),
+                "has_ocr": bool(meta.get("has_ocr", False)),
+                "has_visual_caption": bool(meta.get("has_visual_caption", False)),
+                "page_hash": meta.get("page_hash", ""),
+                "page_image_path": meta.get("image_path", ""),
             })
     return chunks
 
