@@ -477,6 +477,82 @@ def получить_ответ_от_groq(вопрос, фрагменты):
     return текст
 
 
+def обогатить_картинками_соседних_страниц(фрагменты, *, окно: int = 2) -> None:
+    """Добавляет в каждый фрагмент `images_neighbors` — картинки с
+    соседних страниц того же документа из других чанков той же тетради.
+
+    Работает только для фрагментов, у которых известны `notebook_id` и
+    `file_hash`. Для каждого фрагмента с пустым `images` ищет в коллекции
+    тетради чанки на странице ±`окно` и подставляет их картинки.
+
+    Идемпотентно: если у фрагмента уже есть `images_neighbors`, повторно не
+    обновляет его. Если поиск завершается ошибкой — молча пропускает.
+    """
+    if not фрагменты:
+        return
+    группы: dict[tuple[str, str], list[dict]] = {}
+    for фр in фрагменты:
+        nid = фр.get("notebook_id")
+        fh = фр.get("file_hash")
+        if not nid or not fh:
+            continue
+        if фр.get("images") or фр.get("images_neighbors"):
+            continue
+        uid = фр.get("user_id") or пользователь_id
+        группы.setdefault((uid, nid), []).append(фр)
+
+    if not группы:
+        return
+
+    try:
+        клиент = загрузить_qdrant()
+    except Exception:
+        return
+
+    for (uid, nid), bucket in группы.items():
+        try:
+            store = notebooks.load_store(uid)
+        except Exception:
+            continue
+        ноутбуки = store.get("users", {}).get(uid, {}).get("notebooks", [])
+        тетрадь = next((nb for nb in ноутбуки if nb.get("id") == nid), None)
+        if тетрадь is None:
+            continue
+        file_hashes = {фр.get("file_hash") for фр in bucket if фр.get("file_hash")}
+        if not file_hashes:
+            continue
+        try:
+            индекс = notebooks.собрать_картинки_по_страницам(
+                клиент, тетрадь, file_hashes, user_id=uid,
+            )
+        except Exception:
+            continue
+        if not индекс:
+            continue
+        for фр in bucket:
+            fh = фр.get("file_hash")
+            try:
+                page = int(фр.get("page"))
+            except (TypeError, ValueError):
+                continue
+            if not fh or page <= 0:
+                continue
+            соседи: list[dict] = []
+            видели: set[str] = set()
+            for delta in range(1, окно + 1):
+                for сторона in (-delta, delta):
+                    for img in индекс.get((fh, page + сторона), []):
+                        путь = img.get("path") or ""
+                        if not путь or путь in видели:
+                            continue
+                        видели.add(путь)
+                        соседи.append(img)
+                if соседи:
+                    break
+            if соседи:
+                фр["images_neighbors"] = соседи
+
+
 def сериализовать_фрагменты(точки):
     фрагменты = []
     for т in точки:
@@ -555,23 +631,36 @@ def _локальный_путь_картинки(путь_картинки):
     return None
 
 
-def показать_картинки_фрагмента(фр, key_prefix):
-    картинки = фр.get("images") or []
+def _собрать_доступные_картинки(картинки, текущая_страница):
     if not isinstance(картинки, list):
-        return
+        return []
     доступные = []
     for картинка in картинки:
         if not isinstance(картинка, dict):
             continue
         путь = _локальный_путь_картинки(картинка.get("path"))
         if путь:
-            доступные.append((путь, картинка.get("page") or фр.get("page")))
-    if not доступные:
-        return
+            доступные.append((путь, картинка.get("page") or текущая_страница))
+    return доступные
 
-    st.markdown("**Изображения со страницы:**")
-    колонки = st.columns(min(3, len(доступные)), gap="small")
-    for индекс, (путь, страница) in enumerate(доступные):
+
+def показать_картинки_фрагмента(фр, key_prefix):
+    собственные = _собрать_доступные_картинки(фр.get("images"), фр.get("page"))
+    if собственные:
+        заголовок = "**Изображения со страницы:**"
+        список = собственные
+    else:
+        соседние = _собрать_доступные_картинки(
+            фр.get("images_neighbors"), фр.get("page")
+        )
+        if not соседние:
+            return
+        заголовок = "**Изображения с соседних страниц:**"
+        список = соседние
+
+    st.markdown(заголовок)
+    колонки = st.columns(min(3, len(список)), gap="small")
+    for индекс, (путь, страница) in enumerate(список):
         with колонки[индекс % len(колонки)]:
             st.image(
                 str(путь),
@@ -1657,7 +1746,7 @@ with вкладка1:
     elif результат and результат["тип"] == "rag":
         ответ = результат["ответ"]
         фрагменты = результат["фрагменты"]
-
+        обогатить_картинками_соседних_страниц(фрагменты)
 
         есть_маркеры = bool(re.search(r"\[\d+\]", ответ))
 
