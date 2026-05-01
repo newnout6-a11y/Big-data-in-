@@ -766,7 +766,7 @@ def показать_статистику():
         f"</div>"
         for v, l in _stats
     )
-    html = (
+    итоговый_html = (
         f"<div style='display:flex;justify-content:center;align-items:center;"
         f"gap:clamp(2rem,6vw,5rem);padding:3.5rem 0 2rem 0;flex-wrap:wrap'>"
         f"{_items}</div>"
@@ -1127,7 +1127,7 @@ def показать_статистику_поиска(статистика):
         f"<div style='color:var(--text-dim);font-size:0.85rem;margin-top:0.35rem'>{_экранировать(описание)}</div></div>"
         for номер, заголовок, описание in статистика.get("пайплайн", [])
     )
-    html = (
+    итоговый_html = (
         "<div style='margin-top:3rem;border:1px solid var(--border);border-radius:14px;"
         "padding:1.15rem;background:#0c0c0c'>"
         "<div style='display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;margin-bottom:1rem'>"
