@@ -620,134 +620,174 @@ def _построить_svg_граф(узлы, рёбра, adj, id2label, degree
         return "<div style='color:#525252'>нет узлов для графа</div>"
 
     все_id = list(adj.keys())
-
-    # 1. Корень — узел с максимальной степенью. При равенстве — первый по списку.
-    корень = max(все_id, key=lambda nid: (degree.get(nid, 0), -все_id.index(nid)))
-
-    # 2. BFS от корня. Соседей берём в порядке убывания степени, чтобы хабы
-    # шли левее и тянули за собой больше «детей».
-    посещённые: set[str] = {корень}
-    родители: dict[str, str | None] = {корень: None}
-    дети_по_родителю: dict[str, list[str]] = {корень: []}
-    уровни: dict[int, list[str]] = {0: [корень]}
-    очередь: list[tuple[str, int]] = [(корень, 0)]
-    while очередь:
-        узел, lvl = очередь.pop(0)
-        соседи = sorted(adj.get(узел, []), key=lambda n: -degree.get(n, 0))
-        for сосед in соседи:
-            if сосед not in посещённые:
-                посещённые.add(сосед)
-                родители[сосед] = узел
-                дети_по_родителю.setdefault(узел, []).append(сосед)
-                дети_по_родителю.setdefault(сосед, [])
-                уровни.setdefault(lvl + 1, []).append(сосед)
-                очередь.append((сосед, lvl + 1))
-
-    # Изолированные узлы (не достижимы из корня) кладём отдельным «уровнем».
-    изолированные = [n for n in все_id if n not in посещённые]
-    if изолированные:
-        n_max = max(уровни.keys())
-        уровни[n_max + 1] = изолированные
-        for n in изолированные:
-            родители[n] = None
-            дети_по_родителю.setdefault(n, [])
-
-    n_уровней = max(уровни.keys()) + 1
-
-    # 3. Размер холста. Высота растёт с глубиной, ширина с числом узлов на
-    # самом широком уровне.
-    максимум_на_уровне = max(len(уровни[i]) for i in уровни) or 1
-    ширина = max(720, 160 * максимум_на_уровне)
-    высота = max(360, 140 + 130 * (n_уровней - 1))
-    отступ_сверху = 60
-    отступ_снизу = 40
-    шаг_y = ((высота - отступ_сверху - отступ_снизу) / (n_уровней - 1)) if n_уровней > 1 else 0
-
-    # 4. Позиции. Чтобы дети не разъезжались относительно родителей, на каждом
-    # уровне сортируем узлы по x их родителя; потом расставляем равномерно.
-    положения: dict[str, tuple[float, float]] = {}
-    положения[корень] = (ширина / 2, отступ_сверху)
-    for lvl_idx in range(1, n_уровней):
-        узлы_lvl = уровни.get(lvl_idx, [])
-        if not узлы_lvl:
-            continue
-        # Сортируем по x родителя (None → центр)
-        узлы_lvl.sort(key=lambda n: положения.get(родители.get(n) or "", (ширина / 2,))[0])
-        n = len(узлы_lvl)
-        y = отступ_сверху + lvl_idx * шаг_y
-        for i, nid in enumerate(узлы_lvl):
-            x = ширина * (i + 1) / (n + 1)
-            положения[nid] = (x, y)
-
-    # 5. Группируем все edges на tree (родитель → ребёнок) и cross (всё остальное).
-    tree_keys: set[tuple[str, str]] = set()
-    for ребёнок, родитель in родители.items():
-        if родитель is not None:
-            tree_keys.add(tuple(sorted((ребёнок, родитель))))
-
-    cross_keys: set[tuple[str, str]] = set()
+    рёбра_графа: set[tuple[str, str]] = set()
     for ребро in рёбра:
         s = str(ребро.get("source", ""))
         t = str(ребро.get("target", ""))
-        if s not in положения or t not in положения or s == t:
-            continue
-        ключ = tuple(sorted((s, t)))
-        if ключ in tree_keys:
-            continue
-        cross_keys.add(ключ)
+        if s in adj and t in adj and s != t:
+            рёбра_графа.add(tuple(sorted((s, t))))
+    if not рёбра_графа:
+        for s, соседи in adj.items():
+            for t in соседи:
+                if t in adj and s != t:
+                    рёбра_графа.add(tuple(sorted((s, t))))
+
+    корень = max(все_id, key=lambda nid: (degree.get(nid, 0), -все_id.index(nid)))
+    родители: dict[str, str | None] = {корень: None}
+    дети: dict[str, list[str]] = {nid: [] for nid in все_id}
+    посещённые: set[str] = {корень}
+    очередь = [корень]
+    while очередь:
+        nid = очередь.pop(0)
+        соседи = sorted(adj.get(nid, []), key=lambda n: (-degree.get(n, 0), id2label.get(n, n)))
+        for сосед in соседи:
+            if сосед in посещённые:
+                continue
+            посещённые.add(сосед)
+            родители[сосед] = nid
+            дети[nid].append(сосед)
+            очередь.append(сосед)
+
+    for nid in все_id:
+        if nid not in посещённые:
+            родители[nid] = корень
+            дети[корень].append(nid)
+
+    tree_edges = [
+        (parent, nid)
+        for nid, parent in родители.items()
+        if parent is not None
+    ]
+    tree_edge_keys = {tuple(sorted(edge)) for edge in tree_edges}
+
+    def _листья(nid):
+        if not дети.get(nid):
+            return 1
+        return sum(_листья(child) for child in дети[nid])
+
+    листьев = max(1, _листья(корень))
+    node_w = 202
+    node_h = 56
+    gap_x = 236
+    gap_y = 142
+    ширина = max(1060, листьев * gap_x + 180)
+
+    глубина: dict[str, int] = {корень: 0}
+    for nid in все_id:
+        cur = nid
+        d = 0
+        seen = set()
+        while родители.get(cur) is not None and cur not in seen:
+            seen.add(cur)
+            cur = родители[cur]
+            d += 1
+        глубина[nid] = d
+    высота = max(540, (max(глубина.values()) + 1) * gap_y + 110)
+
+    положения: dict[str, tuple[float, float]] = {}
+    следующий_x = 90 + node_w / 2
+
+    def _layout(nid):
+        nonlocal следующий_x
+        children = дети.get(nid, [])
+        if not children:
+            x = следующий_x
+            следующий_x += gap_x
+        else:
+            xs = [_layout(child) for child in children]
+            x = sum(xs) / len(xs)
+        y = 70 + глубина.get(nid, 0) * gap_y
+        положения[nid] = (x, y)
+        return x
+
+    _layout(корень)
+
+    min_x = min(x for x, _ in положения.values())
+    max_x = max(x for x, _ in положения.values())
+    сдвиг = (ширина - (max_x - min_x)) / 2 - min_x
+    for nid, (x, y) in list(положения.items()):
+        положения[nid] = (x + сдвиг, y)
+
+    if max(len(дети.get(nid, [])) for nid in все_id) <= 1 and len(все_id) > 2:
+        for nid, (x, y) in list(положения.items()):
+            d = глубина.get(nid, 0)
+            if d:
+                offset = 115 if d % 2 else -115
+                положения[nid] = (min(ширина - node_w / 2 - 40, max(node_w / 2 + 40, x + offset)), y)
+
+    def _строки(текст, лимит=20, максимум=2):
+        текст = str(текст or "")
+        words = текст.split()
+        if not words:
+            words = [текст]
+        lines = []
+        current = ""
+        for word in words:
+            if len(word) > лимит:
+                parts = [word[i:i + лимит] for i in range(0, len(word), лимит)]
+            else:
+                parts = [word]
+            for part in parts:
+                проба = (current + " " + part).strip()
+                if len(проба) <= лимит:
+                    current = проба
+                else:
+                    if current:
+                        lines.append(current)
+                    current = part
+        if current:
+            lines.append(current)
+        if len(lines) > максимум:
+            lines = lines[:максимум]
+            lines[-1] = lines[-1][:лимит - 1] + "…"
+        return lines or [текст[:лимит]]
 
     куски = [
+        '<div style="width:100%;overflow-x:auto;overflow-y:hidden;border-radius:8px;'
+        'border:1px solid #262626;background:#0d0d0d">',
         f'<svg viewBox="0 0 {ширина} {высота}" xmlns="http://www.w3.org/2000/svg" '
-        'style="width:100%;height:auto;background:#0d0d0d;border-radius:8px;'
-        'border:1px solid #262626">'
+        'style="width:100%;min-width:920px;height:auto;display:block;max-height:78vh">'
     ]
 
-    # 6. Сначала рисуем cross-edges (тонкий серый пунктир, под основой).
-    for s, t in cross_keys:
+    for s, t in sorted(рёбра_графа - tree_edge_keys):
         x1, y1 = положения[s]
         x2, y2 = положения[t]
         куски.append(
             f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
-            'stroke="#374151" stroke-width="1" stroke-dasharray="3,4" '
-            'opacity="0.7" />'
+            'stroke="#2563eb" stroke-width="1.8" opacity="0.7" />'
         )
 
-    # 7. Tree edges — плавные кривые «родитель → ребёнок».
-    for ребёнок, родитель in родители.items():
-        if родитель is None:
-            continue
-        x1, y1 = положения[родитель]
-        x2, y2 = положения[ребёнок]
-        cy1 = y1 + (y2 - y1) * 0.55
-        cy2 = y1 + (y2 - y1) * 0.45
+    for s, t in tree_edges:
+        x1, y1 = положения[s]
+        x2, y2 = положения[t]
+        mid_y = (y1 + y2) / 2
         куски.append(
-            f'<path d="M {x1:.1f} {y1:.1f} '
-            f'C {x1:.1f} {cy1:.1f}, {x2:.1f} {cy2:.1f}, {x2:.1f} {y2:.1f}" '
-            'stroke="#3b82f6" stroke-width="2" fill="none" opacity="0.9" />'
+            f'<path d="M {x1:.1f} {y1 + node_h / 2:.1f} '
+            f'C {x1:.1f} {mid_y:.1f}, {x2:.1f} {mid_y:.1f}, {x2:.1f} {y2 - node_h / 2:.1f}" '
+            'stroke="#3b82f6" stroke-width="2.7" fill="none" opacity="0.92" />'
         )
 
-    # 8. Узлы. Корень крупнее и ярче, далее по degree.
     for nid, (x, y) in положения.items():
         deg = degree.get(nid, 0)
-        является_корнем = (nid == корень)
-        радиус = 32 if является_корнем else (26 if deg > 2 else 21)
-        заливка = "#2563eb" if является_корнем else ("#1e40af" if deg > 2 else "#1e3a8a")
-        обводка = "#60a5fa" if является_корнем else "#3b82f6"
-        ярлык = id2label.get(nid, nid)
-        if len(ярлык) > 16:
-            ярлык = ярлык[:15] + "…"
-        ярлык_xml = html.escape(ярлык, quote=True)
+        is_root = nid == корень
+        fill = "#1e40af" if is_root else ("#1e3a8a" if deg > 1 else "#172554")
+        stroke = "#60a5fa" if is_root else "#3b82f6"
+        left = x - node_w / 2
+        top = y - node_h / 2
         куски.append(
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{радиус}" '
-            f'fill="{заливка}" stroke="{обводка}" stroke-width="1.8" />'
+            f'<rect x="{left:.1f}" y="{top:.1f}" width="{node_w}" height="{node_h}" rx="16" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1.9" />'
         )
-        куски.append(
-            f'<text x="{x:.1f}" y="{y + 4:.1f}" fill="#f0f0f0" '
-            'font-family="Helvetica,Arial,sans-serif" font-size="11" '
-            f'text-anchor="middle">{ярлык_xml}</text>'
-        )
+        lines = _строки(id2label.get(nid, nid))
+        start_y = y - (len(lines) - 1) * 7 + 4
+        for idx, line in enumerate(lines):
+            куски.append(
+                f'<text x="{x:.1f}" y="{start_y + idx * 14:.1f}" fill="#f5f7fb" '
+                'font-family="Helvetica,Arial,sans-serif" font-size="13" font-weight="650" '
+                f'text-anchor="middle">{html.escape(line, quote=True)}</text>'
+            )
 
-    куски.append('</svg>')
+    куски.append('</svg></div>')
     return ''.join(куски)
 
 
@@ -760,6 +800,25 @@ def _страницы_из_файлов(файлы):
         except (TypeError, ValueError):
             pass
     return всего
+
+
+def _тетрадь_заполнена(тетрадь):
+    файлы = тетрадь.get("files") or []
+    return any((файл.get("chunks") or файл.get("pages") or файл.get("slides") or файл.get("name")) for файл in файлы)
+
+
+def _id_тетради_по_умолчанию(тетради_список, текущая_id=None):
+    if not тетради_список:
+        return None
+    по_id = {тетрадь["id"]: тетрадь for тетрадь in тетради_список}
+    заполненные = [тетрадь for тетрадь in тетради_список if _тетрадь_заполнена(тетрадь)]
+    if текущая_id in по_id and (not заполненные or _тетрадь_заполнена(по_id[текущая_id])):
+        return текущая_id
+    if заполненные:
+        return заполненные[0]["id"]
+    if текущая_id in по_id:
+        return текущая_id
+    return тетради_список[0]["id"]
 
 
 def _статистика_после_поиска(результат, тетради_пользователя):
@@ -1332,10 +1391,10 @@ for ключ, данные in кейсы.items():
 пользователь_id = notebooks.get_user_id()
 тетради = notebooks.list_notebooks(пользователь_id)
 if тетради:
-    активная_тетрадь_id = st.session_state.get("активная_тетрадь_id")
-    if активная_тетрадь_id not in {т["id"] for т in тетради}:
-        активная_тетрадь_id = тетради[0]["id"]
-        st.session_state["активная_тетрадь_id"] = активная_тетрадь_id
+    st.session_state["активная_тетрадь_id"] = _id_тетради_по_умолчанию(
+        тетради,
+        st.session_state.get("активная_тетрадь_id"),
+    )
 
 вкладка1, вкладка2, вкладка3, вкладка4, вкладка5 = st.tabs(["Поиск", "Мои документы", "Учёба", "Кейсы", "Архитектура"])
 
@@ -1370,9 +1429,8 @@ with вкладка1:
     искать_в_корпусе = режим_запроса in ("corpus", "mixed")
     with р2:
         варианты_тетрадей = [т["id"] for т in тетради]
-        индекс_тетради = 0
-        if варианты_тетрадей and st.session_state.get("активная_тетрадь_id") in варианты_тетрадей:
-            индекс_тетради = варианты_тетрадей.index(st.session_state["активная_тетрадь_id"])
+        выбранная_по_умолчанию = _id_тетради_по_умолчанию(тетради, st.session_state.get("активная_тетрадь_id"))
+        индекс_тетради = варианты_тетрадей.index(выбранная_по_умолчанию) if выбранная_по_умолчанию in варианты_тетрадей else 0
         выбранная_тетрадь_id = st.selectbox(
             "Тетрадь",
             options=варианты_тетрадей,
@@ -1655,9 +1713,8 @@ with вкладка2:
     д1, д2 = st.columns([1.2, 1], gap="large")
 
     with д1:
-        индекс_активной = 0
-        if варианты_тетрадей and st.session_state.get("активная_тетрадь_id") in варианты_тетрадей:
-            индекс_активной = варианты_тетрадей.index(st.session_state["активная_тетрадь_id"])
+        выбранная_по_умолчанию = _id_тетради_по_умолчанию(тетради, st.session_state.get("активная_тетрадь_id"))
+        индекс_активной = варианты_тетрадей.index(выбранная_по_умолчанию) if выбранная_по_умолчанию in варианты_тетрадей else 0
         тетрадь_для_загрузки_id = st.selectbox(
             "Выберите тетрадь",
             options=варианты_тетрадей,
@@ -1808,9 +1865,8 @@ with вкладка3:
         дизайн.показать_тихую_заметку("Сначала создайте тетрадь и загрузите документы во вкладке «Мои документы».")
     else:
         варианты_учёба = [т["id"] for т in тетради_учёба]
-        индекс_учёба = 0
-        if st.session_state.get("активная_тетрадь_id") in варианты_учёба:
-            индекс_учёба = варианты_учёба.index(st.session_state["активная_тетрадь_id"])
+        выбранная_по_умолчанию = _id_тетради_по_умолчанию(тетради_учёба, st.session_state.get("активная_тетрадь_id"))
+        индекс_учёба = варианты_учёба.index(выбранная_по_умолчанию) if выбранная_по_умолчанию in варианты_учёба else 0
         учебная_тетрадь_id = st.selectbox(
             "Тетрадь для учебных инструментов",
             options=варианты_учёба,
