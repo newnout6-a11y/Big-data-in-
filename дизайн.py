@@ -719,7 +719,7 @@ def применить_стили():
 
 def показать_шапку(документов=575, фрагментов="46 026", кейсов=15, размерность=768):
     """Навигация + hero-блок + сетка статистики."""
-    итоговый_html = (
+    html = (
         '<div class="nav">'
         '<div class="nav-brand"><span class="logo">⬢</span><span>Навигатор / Цифровая химия</span></div>'
         '<div class="nav-meta"><span>система активна</span><span style="color:var(--text-dim);">v.1.0 · 2026</span></div>'
@@ -736,7 +736,7 @@ def показать_шапку(документов=575, фрагментов="
         f'<div class="stat-item"><div class="stat-label">Размерность</div><div class="stat-value">{размерность}</div></div>'
         '</div>'
     )
-    st.markdown(итоговый_html, unsafe_allow_html=True)
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def показать_маркизу():
