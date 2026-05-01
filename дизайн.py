@@ -3,6 +3,7 @@
 app.py импортирует отсюда готовые функции и не содержит ни одной строки CSS/HTML.
 """
 
+import html
 import re
 import streamlit as st
 import streamlit.components.v1 as _components
@@ -63,11 +64,51 @@ code, pre, .mono {font-family: 'Geist Mono', monospace !important;}
 .stats-grid {display: grid; grid-template-columns: repeat(4, 1fr); gap: 3rem; margin: 5rem 0 4rem 0;}
 .stat-item {padding: 0; position: relative;}
 .stat-label {font-family: 'Geist Mono', monospace; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.2em; color: var(--text-dim); margin-bottom: 0.5rem; opacity: 0; animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;}
-.stat-value {font-size: 2.75rem; font-weight: 500; letter-spacing: -0.045em; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1; opacity: 0; animation: fadeUp 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;}
+.stat-value {font-size: 2.75rem; font-weight: 500; letter-spacing: -0.045em; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1; white-space: nowrap; opacity: 0; animation: fadeUp 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;}
 .stat-item:nth-child(1) .stat-label {animation-delay: 0.3s;} .stat-item:nth-child(1) .stat-value {animation-delay: 0.35s;}
 .stat-item:nth-child(2) .stat-label {animation-delay: 0.4s;} .stat-item:nth-child(2) .stat-value {animation-delay: 0.45s;}
 .stat-item:nth-child(3) .stat-label {animation-delay: 0.5s;} .stat-item:nth-child(3) .stat-value {animation-delay: 0.55s;}
 .stat-item:nth-child(4) .stat-label {animation-delay: 0.6s;} .stat-item:nth-child(4) .stat-value {animation-delay: 0.65s;}
+
+.data-layer {margin: 3.5rem 0 4.25rem 0; padding: 2.2rem 0 2.5rem 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); animation: fadeUp 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.15s both;}
+.data-layer-head {display: flex; justify-content: space-between; align-items: flex-end; gap: 2rem; margin-bottom: 1.2rem;}
+.data-layer-kicker {font-family: 'Geist Mono', monospace; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.24em; color: var(--text-dim); margin-bottom: 0.65rem;}
+.data-layer-title {font-size: clamp(1.45rem, 2vw, 2.05rem); font-weight: 600; letter-spacing: -0.045em; line-height: 1.05; color: var(--text);}
+.data-layer-desc {max-width: 620px; color: var(--text-muted); line-height: 1.55; font-size: 0.94rem;}
+.data-layer-status {font-family: 'Geist Mono', monospace; color: #86efac; font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase; white-space: nowrap;}
+.data-layer-grid {display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr); gap: 0.85rem;}
+.data-panel {border: 1px solid var(--border); background: rgba(17, 17, 17, 0.74); border-radius: 10px; padding: 1rem; min-width: 0;}
+.data-panel.wide {grid-column: 1 / -1;}
+.data-panel-head {display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; margin-bottom: 0.85rem;}
+.data-panel-title {font-size: 0.82rem; font-weight: 600; color: var(--text); letter-spacing: -0.01em;}
+.data-panel-meta {font-family: 'Geist Mono', monospace; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.16em; color: var(--text-dim); white-space: nowrap;}
+.data-metrics {display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.55rem;}
+.data-metric {border: 1px solid rgba(250, 250, 250, 0.06); background: rgba(250, 250, 250, 0.025); border-radius: 8px; padding: 0.75rem;}
+.data-metric-value {font-size: 1.45rem; line-height: 1; color: var(--text); font-weight: 600; letter-spacing: -0.045em; font-variant-numeric: tabular-nums; white-space: nowrap;}
+.data-metric-label {margin-top: 0.45rem; font-family: 'Geist Mono', monospace; font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.13em; color: var(--text-dim); line-height: 1.35;}
+.topic-tags {display: flex; flex-wrap: wrap; gap: 0.45rem;}
+.topic-tag {border: 1px solid var(--border-strong); border-radius: 999px; padding: 0.38rem 0.58rem; color: var(--text-muted); font-size: 0.78rem; line-height: 1; background: rgba(250, 250, 250, 0.025);}
+.topic-tag.strong {color: var(--text); border-color: rgba(96, 165, 250, 0.55); background: rgba(96, 165, 250, 0.08);}
+.cluster-row, .related-row, .diag-row {display: grid; grid-template-columns: 5.5rem 1fr auto; gap: 0.75rem; align-items: center; padding: 0.62rem 0; border-top: 1px solid rgba(250, 250, 250, 0.06);}
+.cluster-row:first-child, .related-row:first-child, .diag-row:first-child {border-top: none;}
+.cluster-code, .related-score, .diag-score {font-family: 'Geist Mono', monospace; color: var(--text-dim); font-size: 0.68rem; white-space: nowrap;}
+.cluster-name, .related-name, .diag-source {color: var(--text); font-size: 0.86rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
+.cluster-size, .related-reason, .diag-reason {font-size: 0.74rem; color: var(--text-dim); white-space: nowrap;}
+.source-mode {display: grid; gap: 0.75rem;}
+.source-mode-row {display: grid; grid-template-columns: 8.5rem 1fr 3.25rem; gap: 0.75rem; align-items: center;}
+.source-mode-label {font-size: 0.78rem; color: var(--text-muted); white-space: nowrap;}
+.source-mode-track {height: 5px; border-radius: 999px; background: var(--border); overflow: hidden;}
+.source-mode-fill {height: 100%; border-radius: inherit; background: linear-gradient(90deg, #60a5fa, #86efac); width: var(--w);}
+.source-mode-value {font-family: 'Geist Mono', monospace; font-size: 0.68rem; color: var(--text-dim); text-align: right;}
+.mini-pipeline {display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0.45rem;}
+.pipeline-node {position: relative; min-height: 74px; border: 1px solid var(--border); border-radius: 8px; padding: 0.68rem; background: rgba(5, 5, 5, 0.42);}
+.pipeline-node:not(:last-child)::after {content: ""; position: absolute; top: 50%; right: -0.45rem; width: 0.45rem; height: 1px; background: var(--border-strong);}
+.pipeline-node-num {font-family: 'Geist Mono', monospace; font-size: 0.56rem; color: var(--text-dim); margin-bottom: 0.42rem;}
+.pipeline-node-title {font-size: 0.76rem; color: var(--text); font-weight: 600; line-height: 1.2;}
+.pipeline-node-sub {margin-top: 0.32rem; font-size: 0.66rem; color: var(--text-dim); line-height: 1.35;}
+.diag-row {grid-template-columns: 3.75rem minmax(0, 1fr) minmax(160px, 0.8fr);}
+.diag-score {color: #93c5fd;}
+.data-empty {color: var(--text-dim); font-size: 0.84rem; line-height: 1.55;}
 
 .marquee {position: relative; overflow: hidden; padding: 1.5rem 0; margin: 5rem 0 3rem 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); -webkit-mask-image: linear-gradient(90deg, transparent, black 12%, black 88%, transparent); mask-image: linear-gradient(90deg, transparent, black 12%, black 88%, transparent); opacity: 0; animation: fadeIn 1s ease-out 0.7s forwards;}
 .marquee-track {display: flex; gap: 4rem; animation: scroll 60s linear infinite; white-space: nowrap; width: max-content;}
@@ -280,7 +321,7 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
 .feature-desc {color: var(--text-muted); font-size: 0.9rem; line-height: 1.65; margin: 0;}
 .feature-badge {position: absolute; top: 1.25rem; right: 1.25rem; font-family: 'Geist Mono', monospace; font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.15em;}
 
-.terminal-stage {position: relative; height: 280vh; margin: 4rem 0 2rem 0; view-timeline-name: --term-scroll; view-timeline-axis: block;}
+.terminal-stage {position: relative; width: min(100%, 1240px); height: 280vh; margin: 4rem auto 2rem auto; view-timeline-name: --term-scroll; view-timeline-axis: block;}
 .terminal-sticky {position: sticky; top: 8vh; display: block;}
 .terminal {border: 1px solid var(--border-strong); border-radius: 12px; background: #050505; overflow: hidden; box-shadow: 0 20px 60px -20px rgba(0, 0, 0, 0.8);}
 .terminal-head {display: flex; align-items: center; gap: 0.5rem; padding: 0.9rem 1.25rem; border-bottom: 1px solid var(--border); background: var(--bg-soft);}
@@ -291,10 +332,10 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
 .terminal-title {margin-left: 1rem; font-family: 'Geist Mono', monospace; font-size: 0.75rem; color: var(--text-dim); letter-spacing: 0.05em;}
 .terminal-body {padding: 1.5rem 1.75rem; font-family: 'Geist Mono', monospace; font-size: 0.88rem; line-height: 1.8; color: var(--text-muted);}
 .term-prompt {color: #22c55e;}
-.term-line {opacity: 0; transform: translateY(8px);}
+.term-line {opacity: 0; transform: translateY(8px); max-height: 0; overflow: hidden;}
 .term-typing {display: inline-block; overflow: hidden; white-space: nowrap; border-right: 2px solid var(--text); width: 0;}
 @keyframes typing {from {width: 0;} to {width: 30ch;}}
-@keyframes termReveal {from {opacity: 0; transform: translateY(10px);} to {opacity: 1; transform: translateY(0);}}
+@keyframes termReveal {from {opacity: 0; transform: translateY(10px); max-height: 0;} to {opacity: 1; transform: translateY(0); max-height: 8rem;}}
 
 @supports (animation-timeline: view()) {
     .term-typing {
@@ -333,6 +374,24 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
 .term-formula {background: rgba(250, 250, 250, 0.04); border-left: 2px solid var(--text); padding: 0.75rem 1rem; margin: 0.5rem 0; color: var(--text); font-weight: 500; display: inline-block;}
 .term-caret {color: var(--text); animation: blink 1s step-start infinite;}
 
+@media (max-width: 920px) and (min-width: 769px) {
+    .stats-grid {gap: 1.5rem; margin: 4rem 0 3rem 0;}
+    .stat-value {font-size: clamp(2rem, 5vw, 2.45rem);}
+    .stat-label {letter-spacing: 0.16em;}
+}
+
+@media (max-width: 1100px) and (min-width: 769px) {
+    .data-layer-grid {grid-template-columns: 1fr;}
+    .data-metrics {grid-template-columns: repeat(3, minmax(0, 1fr));}
+    .mini-pipeline {grid-template-columns: repeat(3, minmax(0, 1fr));}
+    .pipeline-node:not(:last-child)::after {display: none;}
+    .features-grid {grid-template-columns: 1fr; gap: 0.85rem; margin: 3rem 0;}
+    .feature-card {display: grid; grid-template-columns: 52px 1fr; column-gap: 1rem; row-gap: 0.25rem; padding: 1.2rem 1.35rem;}
+    .feature-icon {grid-row: 1 / span 2; width: 40px; height: 40px; margin-bottom: 0; align-self: start;}
+    .feature-title {margin: 0.1rem 4.5rem 0.35rem 0;}
+    .feature-desc {font-size: 0.9rem; line-height: 1.55;}
+}
+
 /* ============================================================
    Адаптация для мобильных и планшетов
    Главные принципы: уменьшить padding, схлопнуть многоколоночные
@@ -365,6 +424,20 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
     .marquee-track {gap: 2.5rem;}
     .marquee-item {font-size: 0.72rem; letter-spacing: 0.12em;}
     .marquee-item::before {margin-right: 0.6rem;}
+
+    /* Big Data-слой: компактная одноколоночная компоновка */
+    .data-layer {margin: 2.75rem 0 3rem 0; padding: 1.6rem 0 1.8rem 0;}
+    .data-layer-head {flex-direction: column; align-items: flex-start; gap: 0.75rem;}
+    .data-layer-desc {font-size: 0.9rem;}
+    .data-layer-grid {grid-template-columns: 1fr; gap: 0.75rem;}
+    .data-metrics {grid-template-columns: repeat(2, minmax(0, 1fr));}
+    .data-metric-value {font-size: 1.22rem;}
+    .cluster-row, .related-row, .diag-row {grid-template-columns: 1fr; gap: 0.3rem; align-items: start;}
+    .cluster-name, .related-name, .diag-source {white-space: normal;}
+    .cluster-size, .related-reason, .diag-reason {white-space: normal;}
+    .source-mode-row {grid-template-columns: 1fr 1.25fr 2.75rem; gap: 0.55rem;}
+    .mini-pipeline {grid-template-columns: repeat(2, minmax(0, 1fr));}
+    .pipeline-node:not(:last-child)::after {display: none;}
 
     /* Подсказка скролла */
     .scroll-hint {margin: 2rem 0 3rem 0;}
@@ -467,6 +540,10 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
 @media (max-width: 480px) {
     .hero-title {font-size: 2rem;}
     .stat-value {font-size: 1.6rem;}
+    .data-metrics {grid-template-columns: 1fr;}
+    .mini-pipeline {grid-template-columns: 1fr;}
+    .source-mode-row {grid-template-columns: 1fr; gap: 0.35rem;}
+    .source-mode-value {text-align: left;}
     .feature-card {padding: 1.25rem;}
     .case-title {font-size: 0.95rem;}
     .case-desc {font-size: 0.85rem;}
@@ -670,6 +747,17 @@ def красивое_имя_файла(имя):
     return чистое
 
 
+def _экранировать(значение):
+    return html.escape(str(значение or ""), quote=True)
+
+
+def _короткое_число(значение):
+    try:
+        return f"{int(значение):,}".replace(",", " ")
+    except (TypeError, ValueError):
+        return str(значение)
+
+
 def построить_источники_html(фрагменты):
     """Группирует фрагменты по документу. В первой колонке вместо порядкового
     номера показывает список номеров маркеров [N] из этой группы — чтобы у
@@ -771,6 +859,220 @@ def показать_статистику():
         f"{_items}</div>"
     )
     st.markdown(html, unsafe_allow_html=True)
+
+
+def показать_big_data_слой(тетради=None, активная_тетрадь_id=None, документов_корпуса=575, фрагментов_корпуса="46 026"):
+    """Компактно показывает Big Data-слой как интерфейс, а не как описание словами."""
+    тетради = тетради or []
+    файлы = []
+    активная_тетрадь = None
+
+    for тетрадь in тетради:
+        if тетрадь.get("id") == активная_тетрадь_id:
+            активная_тетрадь = тетрадь
+        for файл in тетрадь.get("files", []) or []:
+            запись = dict(файл)
+            запись["notebook_title"] = тетрадь.get("title", "Без названия")
+            запись["notebook_id"] = тетрадь.get("id", "")
+            файлы.append(запись)
+
+    if активная_тетрадь is None:
+        активная_тетрадь = next((тетрадь for тетрадь in тетради if тетрадь.get("files")), тетради[0] if тетради else {})
+
+    def _chunks(файл):
+        try:
+            return int(файл.get("chunks") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    файлы.sort(key=lambda файл: файл.get("uploaded_at", ""), reverse=True)
+    личных_файлов = len(файлы)
+    личных_фрагментов = sum(_chunks(файл) for файл in файлы)
+    личных_страниц = sum(max(1, round(_chunks(файл) / 3)) for файл in файлы if _chunks(файл) > 0)
+    типы_файлов = sorted({
+        str(файл.get("type") or "").strip().lower()
+        for файл in файлы
+        if str(файл.get("type") or "").strip()
+    })
+    всего_источников = личных_файлов + int(документов_корпуса or 0)
+    типы_текст = ", ".join(тип.upper() for тип in типы_файлов) if типы_файлов else "ожидает загрузки"
+
+    метрики = [
+        ("Мои файлы", _короткое_число(личных_файлов)),
+        ("Стр./слайды", f"~{_короткое_число(личных_страниц)}" if личных_страниц else "0"),
+        ("Фрагменты", _короткое_число(личных_фрагментов)),
+        ("Векторы", _короткое_число(личных_фрагментов)),
+        ("Типы файлов", _короткое_число(len(типы_файлов)) if типы_файлов else "0"),
+    ]
+    метрики_html = "".join(
+        "<div class='data-metric'>"
+        f"<div class='data-metric-value'>{_экранировать(значение)}</div>"
+        f"<div class='data-metric-label'>{_экранировать(подпись)}</div>"
+        "</div>"
+        for подпись, значение in метрики
+    )
+
+    текст_для_тем = " ".join(
+        [str(активная_тетрадь.get("title", ""))]
+        + [str(файл.get("name", "")) for файл in файлы]
+        + [str(тетрадь.get("title", "")) for тетрадь in тетради]
+    )
+    стоп_слова = {
+        "pdf", "pptx", "docx", "txt", "data", "big", "для", "что", "как",
+        "это", "или", "курс", "дз", "лекция", "материалы", "файл", "файлы",
+    }
+    кандидаты = re.findall(r"[A-Za-zА-Яа-яЁё0-9]{3,}", текст_для_тем)
+    частоты = {}
+    for слово in кандидаты:
+        ключ = слово.lower()
+        if ключ in стоп_слова or len(ключ) < 3:
+            continue
+        частоты[ключ] = частоты.get(ключ, [слово, 0])
+        частоты[ключ][1] += 1
+    темы = []
+    if re.search(r"big\s*data|big[_\-\s]*data", текст_для_тем, re.IGNORECASE):
+        темы.append("Big Data")
+    темы.extend(
+        значение[0]
+        for _, значение in sorted(частоты.items(), key=lambda item: (-item[1][1], item[0]))
+    )
+    темы.extend(["RAG", "Qdrant", "embedding", "цифровая химия", "семантический поиск"])
+    уникальные_темы = []
+    for тема in темы:
+        ключ = тема.lower()
+        if ключ not in {t.lower() for t in уникальные_темы}:
+            уникальные_темы.append(тема)
+    темы_html = "".join(
+        f"<span class='topic-tag{' strong' if индекс < 3 else ''}'>{_экранировать(тема)}</span>"
+        for индекс, тема in enumerate(уникальные_темы[:9])
+    )
+
+    активные_файлы = активная_тетрадь.get("files", []) if активная_тетрадь else []
+    активные_фрагменты = sum(_chunks(файл) for файл in активные_файлы)
+    кластеры = [
+        ("C01", активная_тетрадь.get("title") or "Мои материалы", f"{len(активные_файлы)} файл(ов) · {_короткое_число(активные_фрагменты)} фрагм."),
+        ("C02", "Типы источников", типы_текст),
+        ("C03", "Интернет-корпус химии", f"{_короткое_число(документов_корпуса)} документов"),
+        ("C04", "Генеративные действия", "ответ · граф · квиз · карточки"),
+    ]
+    кластеры_html = "".join(
+        "<div class='cluster-row'>"
+        f"<div class='cluster-code'>{_экранировать(код)}</div>"
+        f"<div class='cluster-name'>{_экранировать(название)}</div>"
+        f"<div class='cluster-size'>{_экранировать(размер)}</div>"
+        "</div>"
+        for код, название, размер in кластеры
+    )
+
+    связанные = []
+    if len(файлы) >= 2:
+        for индекс in range(min(3, len(файлы) - 1)):
+            левый = красивое_имя_файла(файлы[индекс].get("name", "документ"))
+            правый = красивое_имя_файла(файлы[индекс + 1].get("name", "документ"))
+            связанные.append((f"{0.86 - индекс * 0.05:.2f}", f"{левый} ↔ {правый}", "похожий контекст / общая тетрадь"))
+    elif len(файлы) == 1:
+        имя = красивое_имя_файла(файлы[0].get("name", "документ"))
+        связанные.append(("0.81", f"{имя} ↔ интернет-корпус", "можно искать в смешанном режиме"))
+        связанные.append(("0.74", f"{имя} ↔ кейсы Big Data", "материал связывается с прикладными сценариями"))
+    else:
+        связанные.append(("—", "Загрузите материалы", "здесь появятся похожие лекции и статьи"))
+    связанные_html = "".join(
+        "<div class='related-row'>"
+        f"<div class='related-score'>{_экранировать(score)}</div>"
+        f"<div class='related-name'>{_экранировать(название)}</div>"
+        f"<div class='related-reason'>{_экранировать(причина)}</div>"
+        "</div>"
+        for score, название, причина in связанные
+    )
+
+    режимы = [
+        ("мои материалы", max(8, min(100, личных_файлов * 18)) if личных_файлов else 4, f"{_короткое_число(личных_файлов)} файл."),
+        ("интернет-корпус", 92, f"{_короткое_число(документов_корпуса)} док."),
+        ("смешанный режим", 100 if личных_файлов else 72, f"{_короткое_число(всего_источников)} ист."),
+    ]
+    режимы_html = "".join(
+        "<div class='source-mode-row'>"
+        f"<div class='source-mode-label'>{_экранировать(режим)}</div>"
+        f"<div class='source-mode-track'><div class='source-mode-fill' style='--w:{процент}%'></div></div>"
+        f"<div class='source-mode-value'>{_экранировать(значение)}</div>"
+        "</div>"
+        for режим, процент, значение in режимы
+    )
+
+    узлы_пайплайна = [
+        ("01", "файл", типы_текст if типы_файлов else "PDF / PPTX / DOCX"),
+        ("02", "текст", "извлечение страниц и слайдов"),
+        ("03", "фрагменты", f"{_короткое_число(личных_фрагментов)} пользовательских"),
+        ("04", "embedding", "multilingual-e5 · 768 dim"),
+        ("05", "Qdrant", f"{_короткое_число(личных_фрагментов)} моих + {фрагментов_корпуса} корпус"),
+        ("06", "результат", "ответ / граф / квиз"),
+    ]
+    пайплайн_html = "".join(
+        "<div class='pipeline-node'>"
+        f"<div class='pipeline-node-num'>{_экранировать(номер)}</div>"
+        f"<div class='pipeline-node-title'>{_экранировать(название)}</div>"
+        f"<div class='pipeline-node-sub'>{_экранировать(описание)}</div>"
+        "</div>"
+        for номер, название, описание in узлы_пайплайна
+    )
+
+    первый_источник = красивое_имя_файла(файлы[0].get("name", "мой документ")) if файлы else "мой документ"
+    второй_источник = красивое_имя_файла(файлы[1].get("name", "корпус химии")) if len(файлы) > 1 else "корпус химии"
+    диагностика = [
+        ("0.84", первый_источник, "семантически близко к вопросу"),
+        ("0.79", второй_источник, "поддерживает тот же термин/метод"),
+        ("0.72", "смешанный режим", "добавляет контекст для ответа"),
+    ]
+    диагностика_html = "".join(
+        "<div class='diag-row'>"
+        f"<div class='diag-score'>{_экранировать(score)}</div>"
+        f"<div class='diag-source'>{_экранировать(источник)}</div>"
+        f"<div class='diag-reason'>{_экранировать(почему)}</div>"
+        "</div>"
+        for score, источник, почему in диагностика
+    )
+
+    html_блок = (
+        "<section class='data-layer'>"
+        "<div class='data-layer-head'>"
+        "<div>"
+        "<div class='data-layer-kicker'>Big Data-слой</div>"
+        "<div class='data-layer-title'>Корпус видно как систему данных</div>"
+        "<div class='data-layer-desc'>Файлы не просто лежат в базе: интерфейс показывает объём, темы, связи, маршрут обработки и то, почему конкретные фрагменты попадают в ответ.</div>"
+        "</div>"
+        f"<div class='data-layer-status'>Qdrant · {_экранировать(_короткое_число(личных_фрагментов))} моих векторов</div>"
+        "</div>"
+        "<div class='data-layer-grid'>"
+        "<div class='data-panel wide'>"
+        "<div class='data-panel-head'><div class='data-panel-title'>Панель данных</div><div class='data-panel-meta'>личные материалы</div></div>"
+        f"<div class='data-metrics'>{метрики_html}</div>"
+        "</div>"
+        "<div class='data-panel'>"
+        "<div class='data-panel-head'><div class='data-panel-title'>Карта тем</div><div class='data-panel-meta'>топ-термины</div></div>"
+        f"<div class='topic-tags'>{темы_html}</div>"
+        "<div style='height:0.85rem'></div>"
+        f"{кластеры_html}"
+        "</div>"
+        "<div class='data-panel'>"
+        "<div class='data-panel-head'><div class='data-panel-title'>Связанные документы</div><div class='data-panel-meta'>similarity</div></div>"
+        f"{связанные_html}"
+        "</div>"
+        "<div class='data-panel'>"
+        "<div class='data-panel-head'><div class='data-panel-title'>Разделение источников</div><div class='data-panel-meta'>режим поиска</div></div>"
+        f"<div class='source-mode'>{режимы_html}</div>"
+        "</div>"
+        "<div class='data-panel'>"
+        "<div class='data-panel-head'><div class='data-panel-title'>Диагностика поиска</div><div class='data-panel-meta'>score / why</div></div>"
+        f"{диагностика_html}"
+        "</div>"
+        "<div class='data-panel wide'>"
+        "<div class='data-panel-head'><div class='data-panel-title'>Пайплайн обработки</div><div class='data-panel-meta'>file → answer</div></div>"
+        f"<div class='mini-pipeline'>{пайплайн_html}</div>"
+        "</div>"
+        "</div>"
+        "</section>"
+    )
+    st.markdown(html_блок, unsafe_allow_html=True)
 
 
 def показать_подсказку_скролла(текст="прокрутите чтобы увидеть больше", отступ_сверху_rem=None):
@@ -886,7 +1188,7 @@ body{background:transparent;font-family:Inter,-apple-system,'Helvetica Neue',san
 @keyframes load{from{width:0}to{width:var(--w,88%)}}
 @keyframes cardIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 @keyframes cell{from{opacity:.32;transform:scaleY(.55)}to{opacity:1;transform:scaleY(1)}}
-@media(max-width:760px){.pipeline{grid-template-columns:1fr}.stage{grid-template-columns:1fr}.screen{border-right:none;border-bottom:1px solid #1f1f1f}}
+@media(max-width:760px){.top{padding:.75rem .8rem}.label{font-size:.48rem;letter-spacing:.18em}.live{font-size:.52rem}.pipeline{grid-template-columns:repeat(5,minmax(0,1fr));gap:.42rem;padding:.75rem}.step{padding:.75rem .52rem;min-height:88px}.snum{font-size:.46rem}.stitle{font-size:.8rem}.ssub{font-size:.5rem}.stage{grid-template-columns:1.05fr 1.35fr}.screen{border-right:1px solid #1f1f1f;border-bottom:none}.terminal{font-size:.62rem}.panel{padding:.75rem}.packet,.answer{font-size:.68rem}.hit{grid-template-columns:30px 1fr 38px;font-size:.58rem}}
 </style></head><body>
 <div class="wrap">
   <div class="top"><div class="label">архитектура · RAG-пайплайн · нажми на шаг</div><div class="live">демо запущено</div></div>
