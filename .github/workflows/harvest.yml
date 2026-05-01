@@ -102,7 +102,7 @@ jobs:
           # sanity-check: видим ли remote
           rclone listremotes --config "$HOME/.config/rclone/rclone.conf"
 
-      - name: Run harvest → push в Drive (ingest/embed выключены по умолчанию)
+      - name: Run harvester.loop (бесконечный цикл внутри runner'а до timeout)
         env:
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
@@ -120,9 +120,16 @@ jobs:
           GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
           GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
         run: |
-          # По умолчанию ingest и embed ВЫКЛЮЧЕНЫ — Action только скачивает PDF
-          # и грузит их в Drive. Чанкинг/векторизацию делать локально.
-          # Включаются вручную через workflow_dispatch input run_ingest/run_embed.
+          # Запускаем harvester.loop — он сам бесконечно итерирует:
+          #   harvest_full → push в Drive → sleep → harvest_full → ...
+          # Пока не упрётся в timeout-minutes (350 = ~5.5 часа). Каждая итерация
+          # ~8-12 минут с budget=200, между ними sleep 2-5 минут с jitter.
+          # Это гарантирует непрерывный поток в Drive независимо от того,
+          # как часто GH Actions фактически триггерит cron (а cron-триггеры
+          # известны как ненадёжные у GitHub Actions: задержки до 30+ минут,
+          # пропуски при высокой нагрузке).
+          #
+          # ingest/embed выключены по умолчанию — векторизация делается локально.
           ARGS=()
           if [ "${{ github.event.inputs.run_ingest || 'false' }}" != "true" ]; then
             ARGS+=(--skip-ingest)
@@ -130,12 +137,14 @@ jobs:
           if [ "${{ github.event.inputs.run_embed || 'false' }}" != "true" ]; then
             ARGS+=(--skip-embed)
           fi
-          python -m harvester.harvest_full \
+          python -m harvester.loop \
             --budget "${{ github.event.inputs.budget || '200' }}" \
             --year-min "${{ github.event.inputs.year_min || '2020' }}" \
             --sources "${{ github.event.inputs.sources || 'arxiv,openalex,europepmc,stackexchange,semanticscholar,chemrxiv,core' }}" \
             --email "${{ secrets.HARVESTER_EMAIL }}" \
-            --time-limit-min 300 \
+            --work-min-low 8 --work-min-high 12 \
+            --sleep-min-low 2 --sleep-min-high 5 \
+            --max-iterations 0 \
             "${ARGS[@]}"
 
       - name: Upload run artifacts
