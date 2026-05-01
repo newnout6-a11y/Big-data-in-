@@ -44,6 +44,7 @@ _БАЗА = os.path.dirname(os.path.abspath(__file__))
 ПАПКА_PDF = os.path.join(_БАЗА, "all_pdfs")
 ПАПКА_МЕТА = os.path.join(_БАЗА, "harvested_meta")
 ПАПКА_ОТБРАКОВКА = os.path.join(_БАЗА, "rejected_pdfs")
+ПАПКА_КАРТИНОК = os.path.join(_БАЗА, "extracted_images")
 ФАЙЛ_ЧАНКОВ = os.path.join(_БАЗА, "chunks_v2.jsonl")
 
 РАЗМЕР_ЧАНКА = 800
@@ -52,9 +53,53 @@ _БАЗА = os.path.dirname(os.path.abspath(__file__))
 EMBED_MODEL_TAG = "e5-base-v1"
 
 
+def _хэш_файла(путь):
+    h = hashlib.sha256()
+    with open(путь, "rb") as f:
+        for блок in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(блок)
+    return h.hexdigest()
+
+
+def _относительный_путь(путь):
+    return os.path.relpath(путь, _БАЗА).replace(os.sep, "/")
+
+
+def _извлечь_картинки_страницы(документ, страница, номер_страницы, папка_документа):
+    картинки = []
+    сохранённые_xref = set()
+    номер_картинки = 0
+    for картинка in страница.get_images(full=True):
+        xref = картинка[0]
+        if xref in сохранённые_xref:
+            continue
+        сохранённые_xref.add(xref)
+        try:
+            pix = fitz.Pixmap(документ, xref)
+            if pix.n >= 5:
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+            номер_картинки += 1
+            os.makedirs(папка_документа, exist_ok=True)
+            путь = os.path.join(
+                папка_документа,
+                f"page_{номер_страницы}_img_{номер_картинки}.png",
+            )
+            pix.save(путь)
+            картинки.append({
+                "path": _относительный_путь(путь),
+                "page": номер_страницы,
+            })
+        except Exception:
+            continue
+    return картинки
+
+
 def _извлечь_pdf_pymupdf(путь):
     страницы = []
+    картинки_по_страницам = {}
     try:
+        хэш_pdf = _хэш_файла(путь)
+        папка_документа = os.path.join(ПАПКА_КАРТИНОК, хэш_pdf)
         документ = fitz.open(путь)
         try:
             for номер, страница in enumerate(документ, start=1):
@@ -62,13 +107,18 @@ def _извлечь_pdf_pymupdf(путь):
                     текст = страница.get_text("text") or ""
                 except Exception:
                     continue
+                картинки = _извлечь_картинки_страницы(
+                    документ, страница, номер, папка_документа
+                )
+                if картинки:
+                    картинки_по_страницам[номер] = картинки
                 if текст and len(текст.strip()) > 50:
                     страницы.append((номер, текст.strip()))
         finally:
             документ.close()
     except Exception as ошибка:
         print(f"  ОШИБКА PyMuPDF: {ошибка}")
-    return страницы
+    return страницы, картинки_по_страницам
 
 
 def _извлечь_pdf_pypdf(путь):
@@ -84,15 +134,15 @@ def _извлечь_pdf_pypdf(путь):
                 страницы.append((номер, текст.strip()))
     except Exception as ошибка:
         print(f"  ОШИБКА pypdf: {ошибка}")
-    return страницы
+    return страницы, {}
 
 
 def извлечь_pdf(путь):
     """PyMuPDF когда доступен (5–10× быстрее, лучше с шрифтами), иначе pypdf."""
     if _ИСПОЛЬЗОВАТЬ_PYMUPDF:
-        страницы = _извлечь_pdf_pymupdf(путь)
+        страницы, картинки_по_страницам = _извлечь_pdf_pymupdf(путь)
         if страницы:
-            return страницы
+            return страницы, картинки_по_страницам
         # Если PyMuPDF ничего не извлёк (защищённый/повреждённый PDF), пробуем pypdf
     return _извлечь_pdf_pypdf(путь)
 
@@ -231,8 +281,9 @@ def main(argv=None):
         for индекс, имя in enumerate(новые, start=1):
             путь = os.path.join(ПАПКА_PDF, имя)
             нижний = имя.lower()
+            картинки_по_страницам = {}
             if нижний.endswith(".pdf"):
-                страницы = извлечь_pdf(путь)
+                страницы, картинки_по_страницам = извлечь_pdf(путь)
             elif нижний.endswith(".docx"):
                 страницы = извлечь_docx(путь)
             else:
@@ -268,7 +319,7 @@ def main(argv=None):
                 год = int(дата_публ[:4])
 
             # Собираем все чанки этого файла
-            пары: list[tuple[int, str]] = []
+            пары: list[tuple[int, str, list[dict]]] = []
             for номер_страницы, текст_страницы in страницы:
                 for чанк in разбить_на_чанки(текст_страницы):
                     хэш = hashlib.sha1(чанк.encode("utf-8")).hexdigest()
@@ -276,23 +327,29 @@ def main(argv=None):
                         с_дедупом += 1
                         continue
                     хэши_в_сессии.add(хэш)
-                    пары.append((номер_страницы, чанк))
+                    пары.append((
+                        номер_страницы,
+                        чанк,
+                        list(картинки_по_страницам.get(номер_страницы, [])),
+                    ))
 
             if not пары:
                 print(f"  [{индекс}/{len(новые)}] ПУСТО после дедупа: {имя}")
                 continue
 
             # Авторазметка батчем
-            тексты = [ч for _, ч in пары]
+            тексты = [ч for _, ч, _ in пары]
             метки_чанков = классифицировать_батч(тексты, модель, метки, прототипы)
 
-            for (номер_стр, чанк), (домен, суб, скор) in zip(пары, метки_чанков):
+            for (номер_стр, чанк, картинки), (домен, суб, скор) in zip(пары, метки_чанков):
                 язык = детерминировать_язык(чанк)
                 кейс = определить_кейс(чанк)  # для backward-compat
+                хэш_текста = hashlib.sha1(чанк.encode("utf-8")).hexdigest()
                 запись = {
                     "text": чанк,
                     "document": имя,
                     "page": номер_стр,
+                    "images": картинки,
                     "case": кейс,                       # backward-compat
                     "doc_id": doc_id,
                     "source": источник,
@@ -304,7 +361,7 @@ def main(argv=None):
                     "topic_score": round(скор, 3),
                     "language": язык,
                     "embed_model": EMBED_MODEL_TAG,
-                    "text_hash": hashlib.sha1(чанк.encode("utf-8")).hexdigest(),
+                    "text_hash": хэш_текста,
                     "ingested_at": datetime.utcnow().strftime("%Y-%m-%d"),
                 }
                 выход.write(json.dumps(запись, ensure_ascii=False) + "\n")

@@ -498,6 +498,7 @@ def сериализовать_фрагменты(точки):
             "file_path": payload.get("file_path"),
             "file_type": payload.get("file_type"),
             "file_hash": payload.get("file_hash"),
+            "images": payload.get("images") or [],
         })
     return фрагменты
 
@@ -535,6 +536,47 @@ def показать_скачивание_источников(фрагмент�
             key=f"{key_prefix}_source_{i}_{abs(hash(str(путь)))}",
             use_container_width=True,
         )
+
+
+def _локальный_путь_картинки(путь_картинки):
+    if not путь_картинки:
+        return None
+    путь = Path(str(путь_картинки))
+    if not путь.is_absolute():
+        путь = APP_DIR / путь
+    try:
+        путь = путь.resolve()
+        путь.relative_to(APP_DIR)
+    except (OSError, ValueError):
+        return None
+    if путь.is_file() and путь.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+        return путь
+    return None
+
+
+def показать_картинки_фрагмента(фр, key_prefix):
+    картинки = фр.get("images") or []
+    if not isinstance(картинки, list):
+        return
+    доступные = []
+    for картинка in картинки:
+        if not isinstance(картинка, dict):
+            continue
+        путь = _локальный_путь_картинки(картинка.get("path"))
+        if путь:
+            доступные.append((путь, картинка.get("page") or фр.get("page")))
+    if not доступные:
+        return
+
+    st.markdown("**Изображения со страницы:**")
+    колонки = st.columns(min(3, len(доступные)), gap="small")
+    for индекс, (путь, страница) in enumerate(доступные):
+        with колонки[индекс % len(колонки)]:
+            st.image(
+                str(путь),
+                caption=f"стр. {страница} · {путь.name}",
+                use_container_width=True,
+            )
 
 
 def показать_экспорт_ответа(заголовок, текст, фрагменты, key_prefix):
@@ -732,6 +774,7 @@ def показать_фрагмент_основания(номер, фр, key_p
         st.markdown("**Выдержка:**")
         полный_текст = почистить_pdf_текст(фр.get("text", ""))
         st.markdown(сделать_выдержку(фр.get("text", "")))
+        показать_картинки_фрагмента(фр, f"{key_prefix}_{номер}")
         if st.toggle("Перевести на русский", key=f"{key_prefix}_translate_{номер}"):
             with st.spinner("Перевожу фрагмент..."):
                 перевод = перевести_на_русский(полный_текст)
