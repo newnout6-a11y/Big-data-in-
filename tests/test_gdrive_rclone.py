@@ -115,7 +115,7 @@ def test_залить_state_only_без_файла(monkeypatch, tmp_path, capsys
 
 
 def test_залить_полный_проход(monkeypatch, tmp_path):
-    """Полный sync: state.json + pdf/docx/txt/meta — каждое отдельной командой."""
+    """Полный sync: state.json + pdf/docx/txt/meta/images — каждое отдельной командой."""
     monkeypatch.setattr(gdrive_rclone, "_БАЗА", str(tmp_path))
     monkeypatch.delenv("RCLONE_CONFIG", raising=False)
     monkeypatch.setenv("GDRIVE_REMOTE", "myremote")
@@ -131,15 +131,18 @@ def test_залить_полный_проход(monkeypatch, tmp_path):
     (tmp_path / "all_pdfs" / "c.txt").write_text("hi")
     (tmp_path / "harvested_meta").mkdir()
     (tmp_path / "harvested_meta" / "x.json").write_text("{}")
+    (tmp_path / "extracted_images").mkdir()
+    (tmp_path / "extracted_images" / "doc").mkdir()
+    (tmp_path / "extracted_images" / "doc" / "page_1_img_1.png").write_bytes(b"png")
 
     fake_run = MagicMock(return_value=MagicMock(returncode=0))
     with patch("harvester.gdrive_rclone._путь_к_rclone", return_value="/r"):
         with patch("harvester.gdrive_rclone.subprocess.run", fake_run):
             успешных = gdrive_rclone.залить()
 
-    # state + 4 маршрута = 5 успешных вызовов
-    assert успешных == 5
-    assert fake_run.call_count == 5
+    # state + 5 маршрутов = 6 успешных вызовов
+    assert успешных == 6
+    assert fake_run.call_count == 6
 
     команды = [tuple(call.args[0]) for call in fake_run.call_args_list]
     # state.json — первая команда (copyto)
@@ -157,6 +160,10 @@ def test_залить_полный_проход(monkeypatch, tmp_path):
     # meta — без --include
     мета = next(к for к in команды if "myremote:корень/meta/" in к)
     assert "--include" not in мета
+    # images — без --include, сохраняет вложенные папки extracted_images/<sha>/
+    картинки = next(к for к in команды if "myremote:корень/images/" in к)
+    assert "--include" not in картинки
+    assert str(tmp_path / "extracted_images") in картинки
 
 
 def test_залить_пропускает_пустые_папки(monkeypatch, tmp_path):

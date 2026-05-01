@@ -19,12 +19,13 @@ gdrive:big-data/
 ├── docx/        ← все *.docx из all_pdfs/
 ├── txt/         ← все *.txt  из all_pdfs/ (StackExchange Q+A и т. п.)
 ├── meta/        ← JSON-метаданные из harvested_meta/
+├── images/      ← картинки из PDF, извлечённые в extracted_images/
 └── state/
     └── state.json   ← чекпоинт парсера (cursor'ы + downloaded_ids)
 ```
 
 `state.json` синкается на каждом прогоне (rclone сам сравнивает по mtime
-и size, не льёт зря). PDF/DOCX/TXT/meta дедуплицируются rclone'ом по
+и size, не льёт зря). PDF/DOCX/TXT/meta/images дедуплицируются rclone'ом по
 имени и размеру — повторно те же файлы не уезжают.
 
 Корневую папку и имя remote'а можно сменить через env:
@@ -115,11 +116,11 @@ python -m harvester.loop --budget 500
    harvester/state.json` (если файла в Drive нет — стартуем с нуля).
 2. Парсер качает свежие документы → `all_pdfs/` + `harvested_meta/`,
    ингестит, пушит чанки в Qdrant.
-3. **После** парсинга — `rclone copy ...` для PDF/DOCX/TXT/meta и
+3. **После** парсинга — `rclone copy ...` для PDF/DOCX/TXT/meta/images и
    обновление `state.json` в Drive.
 4. Loop спит 20–40 минут, повторяет.
 
-В Drive ты сразу увидишь как растёт `pdf/`, `docx/`, `txt/`, `meta/`,
+В Drive ты сразу увидишь как растёт `pdf/`, `docx/`, `txt/`, `meta/`, `images/`,
 а `state/state.json` обновляется на каждой итерации.
 
 ## Полезные команды
