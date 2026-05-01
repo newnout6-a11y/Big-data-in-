@@ -38,6 +38,7 @@ BASE_DIR = Path(__file__).resolve().parent
 USER_DOCUMENTS_DIR = BASE_DIR / "user_documents"
 NOTEBOOKS_FILE = USER_DOCUMENTS_DIR / "notebooks.json"
 HIGHLIGHTS_DIR = USER_DOCUMENTS_DIR / "highlights"
+EXTRACTED_IMAGES_DIR = BASE_DIR / "extracted_images"
 
 DEFAULT_NOTEBOOKS = ("Физхимия 3 курс", "Диплом", "ML курс Воронцова")
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".pptx"}
@@ -379,6 +380,7 @@ def build_chunks(
         if len(text) < 50:
             continue
         meta = visual_meta_by_page.get(page_no, {})
+        page_images = list(page.get("images") or [])
         for chunk_index, chunk_text in enumerate(_split_text(text), 1):
             text_hash = hashlib.sha1(chunk_text.encode("utf-8", errors="ignore")).hexdigest()
             chunks.append({
@@ -401,6 +403,7 @@ def build_chunks(
                 "has_visual_caption": bool(meta.get("has_visual_caption", False)),
                 "page_hash": meta.get("page_hash", ""),
                 "page_image_path": meta.get("image_path", ""),
+                "images": page_images,
             })
     return chunks
 
@@ -466,16 +469,73 @@ def downloadable_name(fragment: Any) -> str:
     return sanitize_filename(payload.get("document") or "document")
 
 
+def _извлечь_картинки_страницы(
+    документ: Any,
+    страница: Any,
+    номер: int,
+    папка: Path,
+) -> list[dict[str, Any]]:
+    """Сохраняет встроенные картинки PDF-страницы и возвращает список путей.
+
+    Формат — как в ingest_v2: `[{"path": "extracted_images/<hash>/page_X_img_Y.png",
+    "page": <int>}]`. Тот же формат ожидает `показать_картинки_фрагмента` в app.py.
+    """
+    if fitz is None:
+        return []
+    результаты: list[dict[str, Any]] = []
+    видели_xref: set[int] = set()
+    счётчик = 0
+    try:
+        картинки = страница.get_images(full=True)
+    except Exception:
+        return []
+    for запись in картинки:
+        xref = запись[0]
+        if xref in видели_xref:
+            continue
+        видели_xref.add(xref)
+        try:
+            pix = fitz.Pixmap(документ, xref)
+            if pix.n >= 5:
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+            счётчик += 1
+            папка.mkdir(parents=True, exist_ok=True)
+            файл = папка / f"page_{номер}_img_{счётчик}.png"
+            pix.save(str(файл))
+        except Exception:
+            continue
+        try:
+            относительный = файл.relative_to(BASE_DIR).as_posix()
+        except ValueError:
+            относительный = str(файл)
+        результаты.append({
+            "path": относительный,
+            "page": номер,
+            "kind": "extracted_image",
+        })
+    return результаты
+
+
 def _extract_pdf(path: Path) -> list[dict[str, Any]]:
+    """Возвращает список страниц `{page, text, images}`.
+
+    `images` — это список встроенных в PDF картинок, сохранённых на диск под
+    `extracted_images/<file_hash>/`. Извлекаются всегда, даже без флага
+    `visual_mode` — это отдельная (бесплатная) фича: «показать рисунки рядом
+    с найденным фрагментом».
+    """
     pages: list[dict[str, Any]] = []
+    file_hash = _file_hash(path)
+    images_dir = EXTRACTED_IMAGES_DIR / file_hash
     if fitz is not None:
         try:
             doc = fitz.open(path)
             try:
                 for index, page in enumerate(doc, start=1):
                     text = page.get_text("text") or ""
-                    if len(text.strip()) > 40:
-                        pages.append({"page": index, "text": text})
+                    images = _извлечь_картинки_страницы(doc, page, index, images_dir)
+                    if len(text.strip()) > 40 or images:
+                        pages.append({"page": index, "text": text, "images": images})
             finally:
                 doc.close()
         except Exception:
@@ -491,10 +551,21 @@ def _extract_pdf(path: Path) -> list[dict[str, Any]]:
             except Exception:
                 text = ""
             if len(text.strip()) > 40:
-                pages.append({"page": index, "text": text})
+                pages.append({"page": index, "text": text, "images": []})
     except Exception:
         return []
     return pages
+
+
+def _file_hash(path: Path) -> str:
+    h = hashlib.sha1()
+    try:
+        with path.open("rb") as f:
+            for блок in iter(lambda: f.read(65536), b""):
+                h.update(блок)
+    except OSError:
+        return "unknown"
+    return h.hexdigest()
 
 
 def _extract_docx(path: Path) -> list[dict[str, Any]]:
