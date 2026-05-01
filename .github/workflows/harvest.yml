@@ -37,6 +37,12 @@ on:
       year_min:
         description: "Минимальный год публикации"
         default: "2020"
+      run_ingest:
+        description: "Запускать ingest_v2 (true/false). По умолчанию false — только скачивание + push в Drive."
+        default: "false"
+      run_embed:
+        description: "Запускать embed_resume_v2 (true/false). По умолчанию false — векторизация делается локально."
+        default: "false"
 
 permissions:
   contents: read
@@ -84,7 +90,7 @@ jobs:
           # sanity-check: видим ли remote
           rclone listremotes --config "$HOME/.config/rclone/rclone.conf"
 
-      - name: Run harvest → ingest → embed → upload (опц)
+      - name: Run harvest → push в Drive (ingest/embed выключены по умолчанию)
         env:
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
@@ -102,12 +108,23 @@ jobs:
           GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
           GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
         run: |
+          # По умолчанию ingest и embed ВЫКЛЮЧЕНЫ — Action только скачивает PDF
+          # и грузит их в Drive. Чанкинг/векторизацию делать локально.
+          # Включаются вручную через workflow_dispatch input run_ingest/run_embed.
+          ARGS=()
+          if [ "${{ github.event.inputs.run_ingest || 'false' }}" != "true" ]; then
+            ARGS+=(--skip-ingest)
+          fi
+          if [ "${{ github.event.inputs.run_embed || 'false' }}" != "true" ]; then
+            ARGS+=(--skip-embed)
+          fi
           python -m harvester.harvest_full \
             --budget "${{ github.event.inputs.budget || '500' }}" \
             --year-min "${{ github.event.inputs.year_min || '2020' }}" \
             --sources "${{ github.event.inputs.sources || 'arxiv,openalex,europepmc,stackexchange,semanticscholar,core' }}" \
             --email "${{ secrets.HARVESTER_EMAIL }}" \
-            --time-limit-min 300
+            --time-limit-min 300 \
+            "${ARGS[@]}"
 
       - name: Upload run artifacts
         if: always()
