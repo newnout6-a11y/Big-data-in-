@@ -1145,7 +1145,7 @@ def показать_статистику_поиска(статистика):
         f"<div style='border:1px solid var(--border);border-radius:10px;padding:1rem;margin-top:0.85rem'><div style='font-weight:700;margin-bottom:0.8rem'>Пайплайн обработки</div><div style='display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:0.55rem'>{пайплайн_html}</div></div>"
         "</div>"
     )
-    st.markdown(html, unsafe_allow_html=True)
+    st.markdown(итоговый_html, unsafe_allow_html=True)
 
 
 def показать_источники_rag(фрагменты):
