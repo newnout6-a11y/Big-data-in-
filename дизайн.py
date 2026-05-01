@@ -736,7 +736,7 @@ def показать_шапку(документов=575, фрагментов="
         f'<div class="stat-item"><div class="stat-label">Размерность</div><div class="stat-value">{размерность}</div></div>'
         '</div>'
     )
-    st.markdown(html, unsafe_allow_html=True)
+    st.markdown(итоговый_html, unsafe_allow_html=True)
 
 
 def показать_маркизу():
