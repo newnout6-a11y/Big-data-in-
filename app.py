@@ -602,6 +602,86 @@ def показать_экспорт_ответа(заголовок, текст,
         )
 
 
+def _построить_svg_граф(узлы, рёбра, adj, id2label, degree):
+    """Чистый SVG без динамических JS-модулей.
+
+    `st.graphviz_chart` ломается за tunnel'ами вроде lhr.life/ngrok, потому что
+    компонент графа подгружает свой JS как ES-module, а прокси режут такие
+    запросы. SVG же отрисовывается сразу в HTML и работает везде.
+    """
+    if not узлы:
+        return "<div style='color:#525252'>нет узлов для графа</div>"
+
+    ширина = 760
+    высота = 460
+    cx, cy = ширина / 2, высота / 2
+    радиус_центра = 110
+    радиус_края = 200
+
+    хабы = [nid for nid in adj.keys() if degree.get(nid, 0) > 2]
+    листья = [nid for nid in adj.keys() if nid not in хабы]
+
+    положения: dict[str, tuple[float, float]] = {}
+    if not хабы:
+        for i, nid in enumerate(листья):
+            угол = 2 * math.pi * i / max(1, len(листья))
+            положения[nid] = (cx + радиус_края * math.cos(угол),
+                              cy + радиус_края * math.sin(угол))
+    else:
+        for i, nid in enumerate(хабы):
+            угол = 2 * math.pi * i / max(1, len(хабы))
+            положения[nid] = (cx + радиус_центра * math.cos(угол),
+                              cy + радиус_центра * math.sin(угол))
+        for i, nid in enumerate(листья):
+            угол = 2 * math.pi * i / max(1, len(листья))
+            положения[nid] = (cx + радиус_края * math.cos(угол),
+                              cy + радиус_края * math.sin(угол))
+
+    куски = [
+        f'<svg viewBox="0 0 {ширина} {высота}" xmlns="http://www.w3.org/2000/svg" '
+        'style="width:100%;height:auto;background:#0d0d0d;border-radius:8px;'
+        'border:1px solid #262626">'
+    ]
+
+    нарисованные: set[tuple[str, str]] = set()
+    for ребро in рёбра:
+        s = str(ребро.get("source", ""))
+        t = str(ребро.get("target", ""))
+        if s not in положения or t not in положения:
+            continue
+        ключ = tuple(sorted((s, t)))
+        if ключ in нарисованные:
+            continue
+        нарисованные.add(ключ)
+        x1, y1 = положения[s]
+        x2, y2 = положения[t]
+        куски.append(
+            f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+            'stroke="#4b5563" stroke-width="1.5" />'
+        )
+
+    for nid, (x, y) in положения.items():
+        deg = degree.get(nid, 0)
+        радиус = 28 if deg > 2 else 22
+        заливка = "#1e40af" if deg > 2 else "#1e3a8a"
+        ярлык = id2label.get(nid, nid)
+        if len(ярлык) > 14:
+            ярлык = ярлык[:13] + "…"
+        ярлык_xml = html.escape(ярлык, quote=True)
+        куски.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{радиус}" '
+            f'fill="{заливка}" stroke="#3b82f6" stroke-width="1.5" />'
+        )
+        куски.append(
+            f'<text x="{x:.1f}" y="{y + 4:.1f}" fill="#f0f0f0" '
+            'font-family="Helvetica,Arial,sans-serif" font-size="11" '
+            f'text-anchor="middle">{ярлык_xml}</text>'
+        )
+
+    куски.append('</svg>')
+    return ''.join(куски)
+
+
 def _страницы_из_файлов(файлы):
     всего = 0
     for файл in файлы:
@@ -615,10 +695,36 @@ def _страницы_из_файлов(файлы):
 
 def _статистика_после_поиска(результат, тетради_пользователя):
     фрагменты = результат.get("фрагменты", [])
+    режим = результат.get("режим") or "поиск"
+
+    # В режиме "только корпус из интернета" пользовательские тетради не учитываются
+    # вообще — иначе статистика подсыпает сумму чанков из всех тетрадей и
+    # сбивает пользователя с толку. В остальных режимах считаем только по
+    # выбранной тетради (если она определена), а не по всем сразу.
+    режим_lower = режим.lower()
+    только_корпус = ("корпус" in режим_lower and "мои" not in режим_lower)
+
+    активная_тетрадь_имя = результат.get("тетрадь")
+    есть_активная_тетрадь = (
+        not только_корпус
+        and активная_тетрадь_имя
+        and активная_тетрадь_имя != "не выбрана"
+    )
+
+    if только_корпус:
+        тетради_для_подсчёта: list = []
+    elif есть_активная_тетрадь:
+        тетради_для_подсчёта = [
+            т for т in тетради_пользователя
+            if т.get("title") == активная_тетрадь_имя
+        ] or list(тетради_пользователя)
+    else:
+        тетради_для_подсчёта = list(тетради_пользователя)
+
     файлы = []
-    типы = set()
+    типы: set[str] = set()
     всего_фрагментов = 0
-    for тетрадь in тетради_пользователя:
+    for тетрадь in тетради_для_подсчёта:
         файлы.extend(тетрадь.get("files", []))
     for файл in файлы:
         if файл.get("type"):
@@ -673,10 +779,20 @@ def _статистика_после_поиска(результат, тетра
     })
 
     мои_векторы = всего_фрагментов
+    if только_корпус:
+        qdrant_статус = "QDRANT · корпус интернета"
+        qdrant_пайплайн = "поиск по корпусу"
+    elif есть_активная_тетрадь:
+        qdrant_статус = f"QDRANT · {мои_векторы} векторов в тетради"
+        qdrant_пайплайн = f"{мои_векторы} в тетради + корпус"
+    else:
+        qdrant_статус = f"QDRANT · {мои_векторы} моих векторов"
+        qdrant_пайплайн = f"{мои_векторы} моих + корпус"
+
     return {
         "режим": режим,
         "тетрадь": результат.get("тетрадь") or "не выбрана",
-        "qdrant_статус": f"QDRANT · {мои_векторы} моих векторов",
+        "qdrant_статус": qdrant_статус,
         "мои_файлы": len(файлы),
         "страницы_слайды": _страницы_из_файлов(файлы),
         "мои_фрагменты": всего_фрагментов,
@@ -691,7 +807,7 @@ def _статистика_после_поиска(результат, тетра
             (2, "текст", "извлечение страниц и слайдов"),
             (3, "фрагменты", f"{len(фрагменты)} найдено для ответа"),
             (4, "embedding", "multilingual-e5 · 768 dim"),
-            (5, "Qdrant", f"{мои_векторы} моих + корпус"),
+            (5, "Qdrant", qdrant_пайплайн),
             (6, "результат", "ответ / источники / статистика"),
         ],
     }
@@ -1980,28 +2096,11 @@ with вкладка3:
                     with (_кол1 if _i % 2 == 0 else _кол2):
                         st.markdown(_card, unsafe_allow_html=True)
                 st.caption("Граф связей")
-                _dot = [
-                    'graph G {',
-                    '  bgcolor="transparent"',
-                    '  node [style="filled,rounded" shape=box fontname="Helvetica" fontsize=11',
-                    '        fontcolor="#f0f0f0" fillcolor="#1e3a8a" color="#3b82f6" penwidth=1.5 margin="0.3,0.15"]',
-                    '  edge [color="#4b5563" penwidth=1.5]',
-                ]
-                for _n in _гузлы:
-                    _nk = str(_n.get("id") or _n.get("label"))
-                    _nd = _nk.replace('"', '\\"')
-                    _nl = str(_n.get("label") or _n.get("id")).replace('"', '\\"')
-                    _fc = '"#1e40af"' if _degree.get(_nk, 0) > 2 else '"#1e3a8a"'
-                    _dot.append(f'  "{_nd}" [label="{_nl}" fillcolor={_fc}]')
-                for _e in _грёбра:
-                    _es = str(_e.get("source", "")).replace('"', '\\"')
-                    _et = str(_e.get("target", "")).replace('"', '\\"')
-                    _dot.append(f'  "{_es}" -- "{_et}"')
-                _dot.append('}')
-                try:
-                    st.graphviz_chart('\n'.join(_dot), use_container_width=True)
-                except Exception:
-                    pass
+                # Чистый SVG без динамических JS-модулей: работает за tunnel'ами
+                # (lhr.life, ngrok), где st.graphviz_chart ломается из-за того,
+                # что прокси не отдаёт chunked ES-modules компонента графа.
+                st.markdown(_построить_svg_граф(_гузлы, _грёбра, _adj, _id2label, _degree),
+                            unsafe_allow_html=True)
                 показать_скачивание_источников(граф_результат["фрагменты"], "mindmap")
 
 with вкладка4:
