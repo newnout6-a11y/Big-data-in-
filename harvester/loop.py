@@ -69,6 +69,10 @@ def _запустить_итерацию(args, work_min: int) -> int:
     ]
     if args.email:
         команда.extend(["--email", args.email])
+    if args.skip_ingest:
+        команда.append("--skip-ingest")
+    if args.skip_embed:
+        команда.append("--skip-embed")
 
     print(f"\n[loop] {_сейчас()} — итерация старт, work={work_min} мин", flush=True)
     print(f"[loop] $ {' '.join(команда)}", flush=True)
@@ -97,6 +101,10 @@ def main(argv=None) -> int:
     парсер.add_argument("--sleep-min-high", type=int, default=int(os.getenv("HARVEST_SLEEP_MIN_HIGH", "40")))
     парсер.add_argument("--max-iterations", type=int, default=int(os.getenv("HARVEST_MAX_ITERATIONS", "0")),
                         help="0 = бесконечно")
+    парсер.add_argument("--skip-ingest", action="store_true",
+                        default=os.getenv("HARVEST_SKIP_INGEST", "").lower() in ("1", "true", "yes"))
+    парсер.add_argument("--skip-embed", action="store_true",
+                        default=os.getenv("HARVEST_SKIP_EMBED", "").lower() in ("1", "true", "yes"))
     args = парсер.parse_args(argv)
 
     if args.work_min_low > args.work_min_high or args.work_min_low <= 0:
