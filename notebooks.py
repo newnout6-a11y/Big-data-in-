@@ -348,6 +348,67 @@ def notebook_fragments(
     return points
 
 
+def собрать_картинки_по_страницам(
+    client: Any,
+    notebook: dict[str, Any],
+    file_hashes: set[str] | list[str],
+    *,
+    user_id: str | None = None,
+) -> dict[tuple[str, int], list[dict[str, Any]]]:
+    """Возвращает индекс `(file_hash, page) -> [images]` по коллекции тетради.
+
+    Скроллит коллекцию тетради с фильтром по user_id/notebook_id, оставляет
+    только чанки с непустым `images` и принадлежащие переданным `file_hashes`.
+    Дедуп картинок выполняется по полю `path` в пределах одной страницы.
+    """
+    user_id = user_id or get_user_id()
+    file_hashes = set(file_hashes or ())
+    if not file_hashes:
+        return {}
+    ensure_collection(client, notebook)
+    query_filter = Filter(must=[
+        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+        FieldCondition(key="notebook_id", match=MatchValue(value=notebook["id"])),
+    ])
+    результат: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    видели: dict[tuple[str, int], set[str]] = {}
+    offset = None
+    while True:
+        batch, offset = client.scroll(
+            collection_name=notebook["collection"],
+            scroll_filter=query_filter,
+            limit=128,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in batch:
+            payload = point.payload or {}
+            fh = payload.get("file_hash")
+            if not fh or fh not in file_hashes:
+                continue
+            картинки = payload.get("images") or []
+            if not isinstance(картинки, list) or not картинки:
+                continue
+            page = _int_page(payload.get("page"))
+            if page is None:
+                continue
+            ключ = (fh, page)
+            пути_видели = видели.setdefault(ключ, set())
+            список = результат.setdefault(ключ, [])
+            for картинка in картинки:
+                if not isinstance(картинка, dict):
+                    continue
+                путь = картинка.get("path") or ""
+                if not путь or путь in пути_видели:
+                    continue
+                пути_видели.add(путь)
+                список.append(картинка)
+        if offset is None:
+            break
+    return результат
+
+
 def extract_pages(path: Path) -> list[dict[str, Any]]:
     ext = path.suffix.lower()
     if ext == ".pdf":
