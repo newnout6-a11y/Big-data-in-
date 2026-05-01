@@ -26,11 +26,18 @@ name: harvest
 # Если RCLONE_CONFIG задан — то же самое в Drive (рекомендуемый путь).
 
 on:
-  # Бесконечный режим: cron триггерит run каждый час. Между прогонами state.json
-  # синкается через Drive, так что новый runner продолжает с того места, где
-  # остановился предыдущий. Никаких git push'ей с данными — только rclone.
+  # Бесконечный режим: cron триггерит run каждые 10 минут (минимальный
+  # интервал, который GH Actions гарантированно держит). Между прогонами
+  # state.json синкается через Drive, так что новый runner продолжает с того
+  # места, где остановился предыдущий.
+  #
+  # При concurrency: cancel-in-progress: false параллельные cron-триггеры не
+  # запускаются — если предыдущий run ещё идёт, следующий просто пропустится.
+  # Это нормально: cron'ы без перерывов = непрерывный поток новых файлов в Drive.
+  #
+  # Никаких git push'ей с данными — только rclone в Drive.
   schedule:
-    - cron: "23 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       budget:
@@ -124,7 +131,7 @@ jobs:
             ARGS+=(--skip-embed)
           fi
           python -m harvester.harvest_full \
-            --budget "${{ github.event.inputs.budget || '500' }}" \
+            --budget "${{ github.event.inputs.budget || '200' }}" \
             --year-min "${{ github.event.inputs.year_min || '2020' }}" \
             --sources "${{ github.event.inputs.sources || 'arxiv,openalex,europepmc,stackexchange,semanticscholar,chemrxiv,core' }}" \
             --email "${{ secrets.HARVESTER_EMAIL }}" \
