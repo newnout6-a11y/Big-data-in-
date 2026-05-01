@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 import дизайн
 import notebooks
 import study_tools
+import визуальная_обработка as виз
 from cases import кейсы, получить_название_кейса
 from fallback_answers import заготовленные_ответы
 from taxonomy import ДОМЕНЫ, название_домена, название_субдомена
@@ -1522,30 +1523,79 @@ with вкладка2:
             accept_multiple_files=True,
             help="Каждая тетрадь пишется в отдельную коллекцию Qdrant и не смешивается с harvest-корпусом.",
         )
+        визуал_режим = st.checkbox(
+            "Распознавать сканы и схемы (медленнее, но видит картинки)",
+            value=False,
+            help="Включает Tier 1 (RapidOCR) для PDF: текст со сканов попадает в индекс. "
+                 "Локально, бесплатно, ~1–3 сек на страницу.",
+            key="визуал_режим_тетрадь",
+        )
+        groq_vision = False
+        if визуал_режим:
+            groq_доступен = виз.groq_vision_available()
+            groq_vision = st.checkbox(
+                "Дополнительно описывать графики/схемы через Groq Vision (платно, ~$0.0004 за страницу)",
+                value=False,
+                disabled=not groq_доступен,
+                help="Если OCR не справился — посылает рендер страницы в Groq Vision "
+                     "и сохраняет машинное описание. Только для страниц без текста.",
+                key="groq_vision_тетрадь",
+            )
+            if not groq_доступен:
+                st.caption("Чтобы включить Groq Vision, задай GROQ_API_KEY в .env.")
+            свод = виз.budget_summary()
+            if свод["total_pages"] > 0:
+                st.caption(
+                    f"Всего вызвано Groq Vision: {свод['total_pages']} стр., "
+                    f"оценка стоимости ~${свод['estimated_cost_usd']:.4f}"
+                )
         if st.button("Загрузить в выбранную тетрадь", type="primary", use_container_width=True):
             if not загруженные:
                 st.warning("Выберите один или несколько файлов.")
             else:
                 uploads = [(ф.name, ф.getvalue()) for ф in загруженные]
+                статус = st.empty()
+                def _on_progress(текст: str) -> None:
+                    статус.caption(текст)
                 try:
-                    with st.spinner("Извлекаю текст, режу на чанки и пишу в Qdrant..."):
+                    spinner_text = (
+                        "Извлекаю текст + OCR, режу на чанки и пишу в Qdrant..."
+                        if визуал_режим
+                        else "Извлекаю текст, режу на чанки и пишу в Qdrant..."
+                    )
+                    with st.spinner(spinner_text):
                         итог = notebooks.ingest_uploaded_files(
                             загрузить_qdrant(),
                             загрузить_модель(),
                             выбранная_для_документов["id"],
                             uploads,
                             user_id=пользователь_id,
+                            visual_mode=bool(визуал_режим),
+                            use_groq_vision=bool(groq_vision),
+                            on_progress=_on_progress,
                         )
-                    st.success(
+                    статус.empty()
+                    msg = (
                         f"Добавлено файлов: {итог['added_files']}; "
                         f"пропущено дублей: {итог['skipped_files']}; "
                         f"чанков: {итог['chunks']}."
                     )
+                    if итог.get("ocr_pages"):
+                        msg += f" Tier 1 OCR: {итог['ocr_pages']} стр."
+                    if итог.get("groq_vision_pages"):
+                        msg += f" Tier 2 Groq Vision: {итог['groq_vision_pages']} стр."
+                    st.success(msg)
                     for ошибка in итог["errors"]:
                         st.warning(ошибка)
+                    шаги = ["текст извлечён"]
+                    if итог.get("ocr_pages"):
+                        шаги.append(f"OCR: {итог['ocr_pages']} стр.")
+                    if итог.get("groq_vision_pages"):
+                        шаги.append(f"Groq Vision: {итог['groq_vision_pages']} стр.")
+                    шаги.extend(["чанки созданы", "Qdrant обновлён"])
                     st.session_state["действие_документы"] = {
                         "заголовок": "Готово",
-                        "шаги": ["текст извлечён", "чанки созданы", "Qdrant обновлён"],
+                        "шаги": шаги,
                     }
                     st.rerun()
                 except Exception as ошибка:
