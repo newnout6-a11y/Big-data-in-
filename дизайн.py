@@ -5,6 +5,7 @@ app.py импортирует отсюда готовые функции и не
 
 import re
 import streamlit as st
+import streamlit.components.v1 as _components
 
 
 # =====================================================================
@@ -24,6 +25,7 @@ CSS_БЛОК = """
     --text: #fafafa;
     --text-muted: #a3a3a3;
     --text-dim: #525252;
+    --accent: #60a5fa;
 }
 
 .stApp {background: var(--bg); color: var(--text); font-family: 'Geist', -apple-system, sans-serif; font-feature-settings: "ss01","cv11";}
@@ -42,6 +44,7 @@ code, pre, .mono {font-family: 'Geist Mono', monospace !important;}
 @keyframes shimmer {0% {background-position: -200% 0;} 100% {background-position: 200% 0;}}
 @keyframes blink {0%, 49% {opacity: 1;} 50%, 100% {opacity: 0;}}
 @keyframes float {0%, 100% {transform: translateY(0);} 50% {transform: translateY(-6px);}}
+@keyframes cardLift {from {opacity: 0; transform: translateY(10px);} to {opacity: 1; transform: translateY(0);}}
 
 .nav {display: flex; justify-content: space-between; align-items: center; padding-bottom: 2rem; border-bottom: 1px solid var(--border); margin-bottom: 4rem; animation: fadeIn 0.5s ease-out;}
 .nav-brand {display: flex; align-items: center; gap: 0.6rem; font-size: 0.95rem; font-weight: 500;}
@@ -81,7 +84,7 @@ code, pre, .mono {font-family: 'Geist Mono', monospace !important;}
 .stTabs [data-baseweb="tab"] {background: transparent; border: none; border-radius: 0; color: var(--text-dim); font-weight: 400; font-size: 0.9rem; padding: 1rem 1.5rem 1rem 0; margin-right: 2rem; position: relative; transition: color 0.25s ease;}
 .stTabs [data-baseweb="tab"]:hover {color: var(--text-muted);}
 .stTabs [aria-selected="true"] {color: var(--text) !important; background: transparent !important;}
-.stTabs [aria-selected="true"]::after {content: ""; position: absolute; bottom: -1px; left: 0; right: 1.5rem; height: 1px; background: var(--text); animation: slideInRight 0.3s cubic-bezier(0.16, 1, 0.3, 1);}
+.stTabs [aria-selected="true"]::after {content: ""; position: absolute; bottom: -1px; left: 0; right: 1.5rem; height: 1px; background: var(--accent); animation: slideInRight 0.3s cubic-bezier(0.16, 1, 0.3, 1);}
 .stTabs [data-baseweb="tab-panel"] {padding-top: 3rem; animation: fadeUp 0.5s cubic-bezier(0.16, 1, 0.3, 1);}
 
 .stTextArea textarea {background: var(--bg-soft) !important; border: 1px solid var(--border-strong) !important; border-radius: 12px !important; color: var(--text) !important; font-size: 1.15rem !important; font-family: 'Geist', sans-serif !important; padding: 1.5rem !important; line-height: 1.5 !important; transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);}
@@ -96,7 +99,7 @@ code, pre, .mono {font-family: 'Geist Mono', monospace !important;}
 .stSlider > div {padding-top: 0 !important; padding-bottom: 0 !important;}
 .stSlider div[style*="height: 0.25rem"], .stSlider div[style*="height:0.25rem"] {height: 3px !important; border-radius: 2px !important; background: var(--border-strong) !important; position: relative; overflow: hidden;}
 .stSlider div[role="slider"] {background: var(--text) !important; border: 3px solid var(--bg) !important; width: 20px !important; height: 20px !important; border-radius: 50% !important; box-shadow: 0 0 0 1px var(--border-strong), 0 4px 12px rgba(0, 0, 0, 0.4) !important; transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important; cursor: grab !important;}
-.stSlider div[role="slider"]:hover {box-shadow: 0 0 0 1px var(--text), 0 0 0 6px rgba(250, 250, 250, 0.08), 0 6px 18px rgba(0, 0, 0, 0.5) !important; transform: translate(0, -5px) scale(1.08) !important;}
+.stSlider div[role="slider"]:hover {box-shadow: 0 0 0 1px var(--text), 0 0 0 8px rgba(250, 250, 250, 0.1), 0 6px 18px rgba(0, 0, 0, 0.5) !important;}
 .stSlider div[role="slider"]:active, .stSlider div[role="slider"]:focus {cursor: grabbing !important; outline: none !important; box-shadow: 0 0 0 1px var(--text), 0 0 0 8px rgba(250, 250, 250, 0.12), 0 8px 22px rgba(0, 0, 0, 0.5) !important;}
 .stSlider [data-testid="stSliderThumbValue"] {background: var(--text) !important; color: var(--bg) !important; font-family: 'Geist Mono', monospace !important; font-weight: 600 !important; border-radius: 6px !important; padding: 3px 9px !important; font-size: 0.76rem !important; top: -34px !important; letter-spacing: 0.02em !important; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35) !important; white-space: nowrap !important;}
 .stSlider [data-testid="stSliderThumbValue"]::after {content: ""; position: absolute; bottom: -4px; left: 50%; transform: translateX(-50%); width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 4px solid var(--text);}
@@ -199,6 +202,37 @@ label, .stMarkdown p, .stMarkdown li {color: var(--text-muted); line-height: 1.7
 .stMarkdown strong {color: var(--text);}
 hr {border-color: var(--border) !important; margin: 2.5rem 0 !important;}
 div[data-testid="stAlert"] {background: var(--bg-soft) !important; border: 1px solid var(--border) !important; border-radius: 8px !important; color: var(--text-muted) !important;}
+div[data-testid="stAlert"] > div,
+[data-testid="stAlertContainer"],
+[data-testid="stAlertContentInfo"],
+[data-testid="stAlertContentWarning"] {background: #111 !important; border-color: var(--border) !important; color: var(--text-muted) !important;}
+[data-testid="stAlertContentInfo"] svg,
+[data-testid="stAlertContentWarning"] svg {color: var(--text-dim) !important;}
+
+.quiet-note {border: 1px solid var(--border); background: #111; border-radius: 8px; padding: 1rem 1.15rem; color: var(--text-muted); line-height: 1.65; margin: 0.75rem 0 1rem 0;}
+.quiet-note strong {color: var(--text);}
+
+.action-feedback {border: 1px solid var(--border); background: #111; border-radius: 8px; padding: 0.85rem 1rem; margin: 0.75rem 0 1.2rem 0; animation: fadeUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);}
+.action-title {font-weight: 600; color: var(--text); letter-spacing: -0.02em;}
+
+.flashcards-grid {display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.85rem; margin: 1.2rem 0 1.5rem 0;}
+details.study-flashcard {background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; animation: cardLift 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; transition: border-color 0.22s ease, transform 0.22s ease, background 0.22s ease;}
+details.study-flashcard:hover {border-color: #334155; background: #151515; transform: translateY(-2px);}
+details.study-flashcard[open] {border-color: #2563eb; background: #101827;}
+details.study-flashcard summary {list-style: none; cursor: pointer; padding: 1rem 1.1rem; min-height: 118px; display: flex; flex-direction: column; gap: 0.55rem;}
+details.study-flashcard summary::-webkit-details-marker {display: none;}
+.flashcard-index {font-family: 'Geist Mono', monospace; font-size: 0.62rem; letter-spacing: 0.16em; color: var(--text-dim); text-transform: uppercase;}
+.flashcard-front {font-size: 1rem; color: var(--text); line-height: 1.45; font-weight: 600; letter-spacing: -0.02em;}
+.flashcard-back {border-top: 1px solid var(--border); padding: 1rem 1.1rem; color: var(--text-muted); line-height: 1.65;}
+.flashcard-source {font-family: 'Geist Mono', monospace; font-size: 0.68rem; color: #93c5fd; margin-top: 0.8rem; line-height: 1.5;}
+.flashcard-source a {color: #93c5fd; text-decoration: none; border-bottom: 1px dashed rgba(147, 197, 253, 0.45);}
+.flashcard-source a:hover {color: #bfdbfe; border-bottom-color: #bfdbfe;}
+
+.mind-card {background:#141414;border:1px solid #222;border-radius:8px;padding:1.1rem 1.2rem;margin-bottom:0.8rem;transition:border-color 0.22s ease, background 0.22s ease, transform 0.22s ease, box-shadow 0.22s ease;}
+.mind-card.is-hub {border-color:#2563eb;}
+.mind-card:hover {border-color:#60a5fa !important;background:#101827;transform:translateY(-3px);box-shadow:0 16px 30px -22px rgba(96,165,250,0.9);}
+.mind-chip {background:#1f2937;padding:2px 8px;border-radius:4px;font-size:0.75rem;color:#93c5fd;margin:0 4px 4px 0;display:inline-block;transition:background 0.2s ease,color 0.2s ease;}
+.mind-card:hover .mind-chip {background:#1e3a8a;color:#bfdbfe;}
 
 details.case-details {border-bottom: 1px solid var(--border); transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);}
 details.case-details summary {list-style: none; cursor: pointer; display: grid; grid-template-columns: 60px 1fr 40px; padding: 1.75rem 0; align-items: start; gap: 1rem; transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);}
@@ -388,6 +422,8 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
     .features-grid {grid-template-columns: 1fr; gap: 1rem; margin: 2.5rem 0;}
     .feature-card {padding: 1.5rem;}
     .feature-icon {width: 36px; height: 36px; margin-bottom: 1.1rem;}
+    .flashcards-grid {grid-template-columns: 1fr;}
+    details.study-flashcard summary {min-height: auto;}
 
     /* Tech-row: 2 фиксированные колонки → 1 колонка с двумя строками */
     .tech-row {grid-template-columns: 1fr; padding: 0.95rem 0; gap: 0.35rem;}
@@ -435,6 +471,35 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
     .case-title {font-size: 0.95rem;}
     .case-desc {font-size: 0.85rem;}
 }
+
+/* Русификация загрузчика файлов */
+[data-testid="stFileUploaderDropzoneInstructions"] span:first-child {font-size: 0;}
+[data-testid="stFileUploaderDropzoneInstructions"] span:first-child::after {content: "Перетащите файлы сюда"; font-size: 1rem; color: var(--text); font-family: 'Geist', sans-serif;}
+[data-testid="stFileUploaderDropzoneInstructions"] span:last-child {font-size: 0;}
+[data-testid="stFileUploaderDropzoneInstructions"] span:last-child::after {content: "До 200 МБ · PDF, DOCX, TXT, MD, PPTX"; font-size: 0.8rem; color: var(--text-dim); font-family: 'Geist Mono', monospace;}
+[data-testid="stFileUploaderDropzone"] [data-testid="stBaseButton-secondary"],
+[data-testid="stFileUploaderDropzone"] [data-testid="stBaseButton-secondary"] p,
+[data-testid="stFileUploaderDropzone"] [data-testid="stBaseButton-secondary"] span {color: transparent !important;}
+[data-testid="stFileUploaderDropzone"] [data-testid="stBaseButton-secondary"] {position: relative !important;}
+[data-testid="stFileUploaderDropzone"] [data-testid="stBaseButton-secondary"]::before {content: "Выбрать файлы"; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: var(--text-muted); font-size: 0.85rem; white-space: nowrap; pointer-events: none;}
+
+/* Единый стиль предупреждений */
+[data-testid="stAlertContainer"] [data-baseweb="notification"] {background-color: var(--bg-soft) !important; border-left-color: var(--border-strong) !important;}
+[data-testid="stAlertContentWarning"] {background-color: transparent !important;}
+[data-testid="stAlertContentWarning"] svg {color: var(--text-dim) !important;}
+[data-testid="stAlertContentWarning"] p, [data-testid="stAlertContentWarning"] div {color: var(--text-muted) !important;}
+[data-testid="stGraphVizChart"] {background: transparent !important; border-radius: 10px; overflow: hidden; width: 100% !important;}
+[data-testid="stGraphVizChart"] svg {background: transparent !important; width: 100% !important; height: auto !important; max-width: 100% !important;}
+div[role="radiogroup"] {display: flex !important; flex-direction: row !important; gap: 0.6rem !important; flex-wrap: wrap !important; background: transparent !important; align-items: center !important;}
+div[role="radiogroup"] label {display: flex !important; align-items: center !important; gap: 0.55rem !important; cursor: pointer !important; padding: 0.3rem 0 !important; margin: 0 !important;}
+div[role="radiogroup"] label > div:first-child {flex-shrink: 0 !important;}
+div[role="radiogroup"] label > div:first-child * {background: transparent !important; border-color: #374151 !important; box-shadow: none !important; outline: none !important;}
+div[role="radiogroup"] label > div:first-child > div {width: 17px !important; height: 17px !important; border-radius: 50% !important; border: 2px solid #374151 !important; background: transparent !important; display: flex !important; align-items: center !important; justify-content: center !important; transition: border-color 0.25s ease !important; box-shadow: none !important;}
+div[role="radiogroup"] label > div:first-child > div > div {width: 7px !important; height: 7px !important; border-radius: 50% !important; background: transparent !important; transition: background 0.25s ease !important; border: none !important;}
+div[role="radiogroup"] label:has(input:checked) > div:first-child > div {border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.15) !important;}
+div[role="radiogroup"] label:has(input:checked) > div:first-child > div > div {background: #2563eb !important;}
+div[role="radiogroup"] label p {color: var(--text-dim) !important; font-size: 0.85rem !important; margin: 0 !important; transition: color 0.2s ease !important;}
+div[role="radiogroup"] label:has(input:checked) p {color: #f0f0f0 !important;}
 </style>
 """
 
@@ -444,11 +509,11 @@ details[open] .case-toggle {transform: rotate(45deg); color: var(--text);}
 # =====================================================================
 
 _маркиза_слова = [
-    "multilingual-e5-base", "Qdrant vector DB", "LLaMA 3.3 70B", "Groq API",
+    "multilingual-e5-base", "Qdrant · векторная БД", "LLaMA 3.3 70B", "Groq API",
     "QSAR модели", "GNN · графовые нейросети", "Байесовская оптимизация",
-    "SMILES · InChI", "Cosine similarity", "768-мерный вектор",
-    "RAG retrieval", "Molecular fingerprints", "DECIMER · OSR",
-    "Active learning", "Soft sensors", "Open Reaction Database"
+    "SMILES · InChI", "Косинусная близость", "768-мерный вектор",
+    "RAG-поиск", "Молекулярные отпечатки", "DECIMER · OSR",
+    "Активное обучение", "Программные сенсоры", "Open Reaction Database"
 ]
 
 _фичи = [
@@ -683,6 +748,31 @@ def показать_маркизу():
     st.markdown(html, unsafe_allow_html=True)
 
 
+def показать_статистику():
+    """Строка ключевых цифр корпуса между маркизой и фичами."""
+    _stats = [
+        ("48 K+", "химических статей"),
+        ("70B", "параметров в LLM"),
+        ("Hybrid", "поисковый движок"),
+        ("Auto", "сбор данных"),
+    ]
+    _items = "".join(
+        f"<div style='text-align:center'>"
+        f"<div style='font-family:\"Geist Mono\",monospace;font-size:2.2rem;font-weight:700;"
+        f"color:#fafafa;letter-spacing:-0.04em;line-height:1'>{v}</div>"
+        f"<div style='font-family:\"Geist Mono\",monospace;font-size:0.62rem;text-transform:uppercase;"
+        f"letter-spacing:0.22em;color:#525252;margin-top:0.5rem'>{l}</div>"
+        f"</div>"
+        for v, l in _stats
+    )
+    html = (
+        f"<div style='display:flex;justify-content:center;align-items:center;"
+        f"gap:clamp(2rem,6vw,5rem);padding:3.5rem 0 2rem 0;flex-wrap:wrap'>"
+        f"{_items}</div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def показать_подсказку_скролла(текст="прокрутите чтобы увидеть больше", отступ_сверху_rem=None):
     """Вертикальная анимированная полоса с подписью."""
     стиль = f' style="margin-top: {отступ_сверху_rem}rem;"' if отступ_сверху_rem is not None else ''
@@ -693,6 +783,159 @@ def показать_подсказку_скролла(текст="прокру�
         '</div>'
     )
     st.markdown(html, unsafe_allow_html=True)
+
+
+def показать_переход():
+    """Трёхколоночный блок: шаги → скролл-хинт → возможности."""
+    _шаги = [
+        ("01", "Загрузи документы"),
+        ("02", "Задай вопрос"),
+        ("03", "Исследуй граф"),
+    ]
+    _фичи = [
+        ("RAG", "поиск по корпусу"),
+        ("Quiz", "интерактивный квиз"),
+        ("Graph", "граф концептов"),
+    ]
+    _стиль_метка = (
+        "font-family:'Geist Mono',monospace;font-size:0.6rem;text-transform:uppercase;"
+        "letter-spacing:0.22em;color:#525252"
+    )
+    _стиль_текст = (
+        "font-family:'Geist Mono',monospace;font-size:0.78rem;color:#a3a3a3;margin-top:0.15rem"
+    )
+    _лево = "".join(
+        f"<div style='text-align:right;margin-bottom:1.4rem'>"
+        f"<div style='{_стиль_метка}'>{n}</div>"
+        f"<div style='{_стиль_текст}'>{t}</div>"
+        f"</div>"
+        for n, t in _шаги
+    )
+    _право = "".join(
+        f"<div style='text-align:left;margin-bottom:1.4rem'>"
+        f"<div style='{_стиль_метка}'>{n}</div>"
+        f"<div style='{_стиль_текст}'>{t}</div>"
+        f"</div>"
+        for n, t in _фичи
+    )
+    html = (
+        f"<div style='display:grid;grid-template-columns:1fr auto 1fr;gap:3rem;"
+        f"align-items:center;padding:3rem 2rem;margin-top:3rem'>"
+        f"<div style='display:flex;flex-direction:column;align-items:flex-end'>{_лево}</div>"
+        f"<div class='scroll-hint' style='margin:0'>"
+        f"<div class='scroll-hint-label'>попробуйте сами ↓</div>"
+        f"<div class='scroll-hint-line'></div>"
+        f"</div>"
+        f"<div style='display:flex;flex-direction:column;align-items:flex-start'>{_право}</div>"
+        f"</div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def показать_пайплайн():
+    """Интерактивная схема RAG-пайплайна с анимацией по клику."""
+    _html = """
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:transparent;font-family:Inter,-apple-system,'Helvetica Neue',sans-serif;padding:0.45rem 0 1.45rem;color:#fafafa}
+.wrap{border:1px solid #222;background:#0b0b0b;border-radius:12px;overflow:hidden;box-shadow:0 18px 46px -34px rgba(0,0,0,.9)}
+.top{padding:.9rem 1rem;border-bottom:1px solid #1f1f1f;display:flex;align-items:center;justify-content:space-between;gap:1rem;background:#0d0d0d}
+.label{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.56rem;text-transform:uppercase;letter-spacing:.24em;color:#525252}
+.live{display:flex;align-items:center;gap:.45rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.62rem;color:#737373;text-transform:uppercase;letter-spacing:.14em}
+.live:before{content:"";width:6px;height:6px;border-radius:50%;background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,.55);animation:pulse 3.5s ease-in-out infinite}
+.pipeline{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.55rem;padding:1rem}
+.step{position:relative;border:1px solid #1f1f1f;background:#111;border-radius:10px;padding:.95rem .8rem;min-height:96px;cursor:pointer;transition:all .38s cubic-bezier(.16,1,.3,1);overflow:hidden;user-select:none}
+.step:after{content:"";position:absolute;inset:0;background:linear-gradient(115deg,transparent,rgba(250,250,250,.06),transparent);transform:translateX(-130%);transition:transform 1.35s ease}
+.step:hover{border-color:#2a2a2a;background:#151515;transform:translateY(-2px)}
+.step:hover:after{transform:translateX(130%)}
+.step.active{border-color:#737373;background:#171717;box-shadow:0 0 0 1px rgba(250,250,250,.05),0 16px 34px -30px rgba(250,250,250,.42);transform:translateY(-3px)}
+.step.done{border-color:#2a2a2a;background:#101010;opacity:.58}
+.snum{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.52rem;letter-spacing:.22em;color:#525252;margin-bottom:.45rem}
+.stitle{font-size:.98rem;font-weight:700;color:#e5e7eb;letter-spacing:-.025em;margin-bottom:.24rem;position:relative;z-index:1}
+.ssub{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.6rem;color:#5f5f5f;position:relative;z-index:1}
+.step.active .stitle{color:#fafafa}
+.stage{display:grid;grid-template-columns:1.05fr 1.35fr;gap:0;border-top:1px solid #1f1f1f;min-height:206px}
+.screen{padding:1rem 1.1rem;border-right:1px solid #1f1f1f;background:#080808}
+.screen-title{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.58rem;letter-spacing:.18em;text-transform:uppercase;color:#525252;margin-bottom:.85rem}
+.terminal{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.72rem;line-height:1.65;color:#a3a3a3}
+.term-line{opacity:0;transform:translateY(6px);animation:lineIn 1.2s ease forwards}
+.term-line:nth-child(2){animation-delay:.8s}.term-line:nth-child(3){animation-delay:1.6s}.term-line:nth-child(4){animation-delay:2.4s}.term-line:nth-child(5){animation-delay:3.2s}
+.prompt{color:#22c55e}.val{color:#e5e7eb}.muted{color:#525252}
+.visual{position:relative;padding:1rem 1.1rem;background:#0a0a0a;overflow:hidden}
+.visual:before{content:"";position:absolute;inset:0;background-image:linear-gradient(rgba(250,250,250,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(250,250,250,.025) 1px,transparent 1px);background-size:28px 28px;opacity:.65}
+.panel{position:relative;z-index:1;border:1px solid #222;background:rgba(17,17,17,.88);border-radius:10px;padding:.95rem;min-height:170px}
+.panel-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.58rem;text-transform:uppercase;letter-spacing:.16em;color:#a3a3a3}
+.bar{height:4px;border-radius:999px;background:#1f1f1f;overflow:hidden;margin:.52rem 0}
+.bar span{display:block;height:100%;background:linear-gradient(90deg,#525252,#a3a3a3);animation:load 6s cubic-bezier(.16,1,.3,1) forwards}
+.packet{border:1px solid #2a2a2a;border-radius:8px;padding:.65rem .75rem;color:#d4d4d4;font-size:.78rem;line-height:1.45;background:#101010;animation:cardIn 1.2s ease both}
+.matrix{display:grid;grid-template-columns:repeat(8,1fr);gap:4px;margin-top:.6rem}
+.cell{height:18px;border-radius:3px;background:#242424;animation:cell 2.2s ease infinite alternate}
+.hits{display:grid;gap:.45rem;margin-top:.55rem}
+.hit{display:grid;grid-template-columns:38px 1fr 46px;gap:.55rem;align-items:center;border:1px solid #2a2a2a;background:#101010;border-radius:7px;padding:.5rem;color:#d4d4d4;font-size:.68rem;animation:cardIn 1.2s ease both}
+.score{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#a3a3a3}
+.tokens{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.65rem}
+.tok{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.64rem;background:#151515;color:#d4d4d4;border:1px solid #2a2a2a;border-radius:999px;padding:.22rem .45rem;animation:cardIn 1.2s ease both}
+.answer{font-size:.78rem;color:#d4d4d4;line-height:1.55}
+.cite{color:#93c5fd}
+.dots{display:flex;gap:5px;justify-content:center;padding:.75rem 0 .95rem;border-top:1px solid #1f1f1f;background:#0b0b0b}
+.dot{width:6px;height:6px;border-radius:50%;background:#242424;transition:all .35s}
+.dot.done{background:#525252}.dot.cur{background:#fafafa;box-shadow:0 0 10px rgba(250,250,250,.35)}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.82)}}
+@keyframes lineIn{to{opacity:1;transform:translateY(0)}}
+@keyframes load{from{width:0}to{width:var(--w,88%)}}
+@keyframes cardIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes cell{from{opacity:.32;transform:scaleY(.55)}to{opacity:1;transform:scaleY(1)}}
+@media(max-width:760px){.pipeline{grid-template-columns:1fr}.stage{grid-template-columns:1fr}.screen{border-right:none;border-bottom:1px solid #1f1f1f}}
+</style></head><body>
+<div class="wrap">
+  <div class="top"><div class="label">архитектура · RAG-пайплайн · нажми на шаг</div><div class="live">демо запущено</div></div>
+  <div class="pipeline" id="pl"></div>
+  <div class="stage">
+    <div class="screen"><div class="screen-title">журнал выполнения</div><div class="terminal" id="log"></div></div>
+    <div class="visual"><div class="panel" id="panel"></div></div>
+  </div>
+  <div class="dots" id="dots"></div>
+</div>
+<script>
+const S=[
+  {n:'01',t:'Запрос',s:'вопрос пользователя',h:'входной запрос',log:['> Какая формула выхода реакции?','нормализация: русский текст, 42 символа','маршрут: химия + документы'],panel:'<div class="panel-head"><span>сырой запрос</span><span>0 мс</span></div><div class="packet">Какая формула выхода реакции?</div><div class="bar" style="--w:72%"><span></span></div><div class="packet muted">удалены лишние пробелы · выбран режим поиска · запрос подготовлен</div>'},
+  {n:'02',t:'Эмбеддинг',s:'multilingual-e5',h:'кодирование',log:['загрузка: intfloat/multilingual-e5-base','запрос превращается в 768-мерный вектор','нормализация вектора для cosine similarity'],panel:'<div class="panel-head"><span>вектор запроса</span><span>768 измерений</span></div><div class="packet">запрос: Какая формула выхода реакции?</div><div class="matrix">'+Array.from({length:32},(_,i)=>`<div class="cell" style="animation-delay:${i*0.025}s"></div>`).join('')+'</div><div class="bar" style="--w:91%"><span></span></div>'},
+  {n:'03',t:'Поиск',s:'Qdrant top-k',h:'поиск',log:['коллекция: тетрадь + корпус','HNSW-поиск по косинусной близости','возвращены top-k фрагменты: 5'],panel:'<div class="panel-head"><span>найденные фрагменты</span><span>142 мс</span></div><div class="hits"><div class="hit"><span>[1]</span><span>фрагмент из документа · страница из индекса</span><span class="score">0.84</span></div><div class="hit"><span>[2]</span><span>фрагмент из документа · страница из индекса</span><span class="score">0.79</span></div><div class="hit"><span>[3]</span><span>фрагмент из документа · страница из индекса</span><span class="score">0.73</span></div></div>'},
+  {n:'04',t:'Генерация',s:'LLaMA 3.3 70B',h:'синтез ответа',log:['сбор контекста: вопрос + 5 фрагментов','модель: llama-3.3-70b-versatile','ответ формируется с маркерами цитат'],panel:'<div class="panel-head"><span>контекст в модель</span><span>5 фрагментов</span></div><div class="tokens"><span class="tok">ВОПРОС</span><span class="tok">[1] формула</span><span class="tok">[2] определение</span><span class="tok">правила ответа</span><span class="tok">только с цитатами</span></div><div class="bar" style="--w:86%"><span></span></div><div class="packet">модель собирает ответ только из найденного контекста</div>'},
+  {n:'05',t:'Ответ',s:'цитаты и страницы',h:'интерфейс',log:['проверка маркеров [N]','подстановка документов и страниц','отрисовка ответа и источников'],panel:'<div class="panel-head"><span>готовый ответ</span><span>интерфейс</span></div><div class="answer">Ответ получает маркеры <span class="cite">[N]</span>, а интерфейс подставляет документ и страницу из найденного фрагмента.</div><div class="hits"><div class="hit"><span>[N]</span><span>открыть реальный источник</span><span class="score">ссылка</span></div></div>'}
+];
+let tmr=null;
+const pl=document.getElementById('pl'),log=document.getElementById('log'),panel=document.getElementById('panel'),dts=document.getElementById('dots');
+S.forEach((s,i)=>{
+  const d=document.createElement('div');d.className='step';d.id='s'+i;
+  d.innerHTML=`<div class="snum">${s.n}</div><div class="stitle">${s.t}</div><div class="ssub">${s.s}</div>`;
+  d.onclick=()=>go(i);pl.appendChild(d);
+  const dt=document.createElement('div');dt.className='dot';dt.id='d'+i;dts.appendChild(dt);
+});
+function reset(){S.forEach((_,i)=>{document.getElementById('s'+i).className='step';document.getElementById('d'+i).className='dot';});}
+function render(i){
+  const s=S[i];
+  log.innerHTML=s.log.map((x,k)=>`<div class="term-line"><span class="${k===0?'prompt':'muted'}">${k===0?'':'['+s.h+'] '}</span><span class="val">${x}</span></div>`).join('');
+  panel.innerHTML=s.panel;
+}
+function go(from){
+  if(tmr)clearTimeout(tmr);
+  reset();
+  function tick(i){
+    if(i>=S.length){tmr=setTimeout(()=>go(0),1600);return;}
+    if(i>from){document.getElementById('s'+(i-1)).className='step done';document.getElementById('d'+(i-1)).className='dot done';}
+    document.getElementById('s'+i).className='step active';
+    document.getElementById('d'+i).className='dot cur';
+    render(i);
+    tmr=setTimeout(()=>tick(i+1),6750);
+  }
+  tick(from);
+}
+go(0);
+</script></body></html>
+"""
+    _components.html(_html, height=440, scrolling=False)
 
 
 def показать_фичи():
@@ -758,16 +1001,41 @@ def показать_вертикальный_отступ(rem=1.8):
     st.markdown(f'<div style="height: {rem}rem;"></div>', unsafe_allow_html=True)
 
 
-def показать_мета_демо(название_кейса):
-    """Заголовок блока ответа в демо-режиме."""
-    html = (
-        '<div class="answer-container">'
-        '<div class="answer-meta">'
-        '<span><span class="dot"></span>демо-режим</span>'
-        f'<span>кейс · {название_кейса}</span>'
-        '</div></div>'
+def показать_анимацию_действия(заголовок, шаги):
+    """Короткая визуальная обратная связь после действия пользователя."""
+    st.markdown(
+        '<div class="action-feedback">'
+        f'<div class="action-title">{заголовок}</div>'
+        '</div>',
+        unsafe_allow_html=True,
     )
-    st.markdown(html, unsafe_allow_html=True)
+
+
+def показать_тихую_заметку(текст):
+    """Нейтральная заметка вместо яркого Streamlit alert."""
+    st.markdown(f'<div class="quiet-note">{текст}</div>', unsafe_allow_html=True)
+
+
+def прокрутить_к_якорю(anchor_id):
+    """Плавно прокручивает страницу Streamlit к уже отрисованному HTML-якорю."""
+    safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "", str(anchor_id or ""))
+    if not safe_id:
+        return
+    _components.html(
+        f"""
+<script>
+const go = () => {{
+  const doc = window.parent.document;
+  const el = doc.getElementById("{safe_id}");
+  if (el) el.scrollIntoView({{behavior: "smooth", block: "start"}});
+}};
+setTimeout(go, 80);
+setTimeout(go, 360);
+</script>
+""",
+        height=1,
+        scrolling=False,
+    )
 
 
 def показать_мета_rag(число_фрагментов, модель="llama-3.3-70b"):
@@ -786,19 +1054,6 @@ def показать_мета_rag(число_фрагментов, модель=
 def показать_источники_rag(фрагменты):
     """Источники RAG-ответа: группировка по документу со списком страниц."""
     st.markdown(построить_источники_html(фрагменты), unsafe_allow_html=True)
-
-
-def показать_источники_демо(источники):
-    """Источники из демо-режима — плоский список строк."""
-    html = ""
-    for i, ист in enumerate(источники, 1):
-        html += (
-            f'<div class="source-row">'
-            f'<span class="num">{i:02d}</span>'
-            f'<span class="doc">{ист}</span>'
-            f'</div>'
-        )
-    st.markdown(html, unsafe_allow_html=True)
 
 
 def показать_кейсы(кейсы):

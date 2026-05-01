@@ -5,6 +5,7 @@ import io
 import json
 import re
 import tempfile
+import csv
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -256,10 +257,48 @@ def cards_to_tsv(cards: list[dict[str, Any]]) -> bytes:
     for card in cards:
         front = _clean_cell(card.get("front") or card.get("question") or "")
         back = _clean_cell(card.get("back") or card.get("answer") or "")
-        source = _clean_cell(card.get("source") or "")
+        source = _clean_cell(card.get("source_display") or card.get("source") or "")
         if front and back:
             rows.append(f"{front}\t{back} {source}".strip())
     return ("\n".join(rows) + "\n").encode("utf-8")
+
+
+def cards_to_csv(cards: list[dict[str, Any]]) -> bytes:
+    out = io.StringIO()
+    writer = csv.writer(out, delimiter=";")
+    writer.writerow(["Вопрос", "Ответ", "Источник"])
+    for card in cards:
+        front = _clean_cell(card.get("front") or card.get("question") or "")
+        back = _clean_cell(card.get("back") or card.get("answer") or "")
+        source = _clean_cell(card.get("source_display") or card.get("source") or "")
+        if front and back:
+            writer.writerow([front, back, source])
+    return out.getvalue().encode("utf-8-sig")
+
+
+def cards_docx_export(title: str, cards: list[dict[str, Any]]) -> bytes:
+    document = docx.Document()
+    document.add_heading(title.strip() or "Учебные карточки", level=1)
+    for index, card in enumerate(cards, 1):
+        front = _clean_cell(card.get("front") or card.get("question") or "")
+        back = _clean_cell(card.get("back") or card.get("answer") or "")
+        source = _clean_cell(card.get("source_display") or card.get("source") or "")
+        if not front or not back:
+            continue
+        document.add_heading(f"Карточка {index}", level=2)
+        q = document.add_paragraph()
+        q.add_run("Вопрос: ").bold = True
+        q.add_run(front)
+        a = document.add_paragraph()
+        a.add_run("Ответ: ").bold = True
+        a.add_run(back)
+        if source:
+            s = document.add_paragraph()
+            s.add_run("Источник: ").bold = True
+            s.add_run(source)
+    out = io.BytesIO()
+    document.save(out)
+    return out.getvalue()
 
 
 def build_apkg(cards: list[dict[str, Any]], deck_name: str, *, package_id: str = "") -> bytes | None:
@@ -287,7 +326,7 @@ def build_apkg(cards: list[dict[str, Any]], deck_name: str, *, package_id: str =
     for card in cards:
         front = str(card.get("front") or card.get("question") or "").strip()
         back = str(card.get("back") or card.get("answer") or "").strip()
-        source = str(card.get("source") or "").strip()
+        source = str(card.get("source_display") or card.get("source") or "").strip()
         if not front or not back:
             continue
         note = genanki.Note(
@@ -330,6 +369,14 @@ def save_flashcard_exports(
     tsv_path = export_path / f"{base_name}.tsv"
     tsv_path.write_bytes(tsv_bytes)
 
+    csv_bytes = cards_to_csv(cards)
+    csv_path = export_path / f"{base_name}.csv"
+    csv_path.write_bytes(csv_bytes)
+
+    docx_bytes = cards_docx_export(deck_name, cards)
+    docx_path = export_path / f"{base_name}.docx"
+    docx_path.write_bytes(docx_bytes)
+
     apkg_bytes = build_apkg(cards, deck_name, package_id=package_id)
     apkg_path = None
     if apkg_bytes:
@@ -339,6 +386,10 @@ def save_flashcard_exports(
     return {
         "tsv_bytes": tsv_bytes,
         "tsv_path": str(tsv_path),
+        "csv_bytes": csv_bytes,
+        "csv_path": str(csv_path),
+        "docx_bytes": docx_bytes,
+        "docx_path": str(docx_path),
         "apkg_bytes": apkg_bytes,
         "apkg_path": str(apkg_path) if apkg_path else "",
     }
