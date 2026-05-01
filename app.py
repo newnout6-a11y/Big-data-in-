@@ -603,39 +603,98 @@ def показать_экспорт_ответа(заголовок, текст,
 
 
 def _построить_svg_граф(узлы, рёбра, adj, id2label, degree):
-    """Чистый SVG без динамических JS-модулей.
+    """Иерархический mind-map в чистом SVG без динамических JS-модулей.
 
-    `st.graphviz_chart` ломается за tunnel'ами вроде lhr.life/ngrok, потому что
-    компонент графа подгружает свой JS как ES-module, а прокси режут такие
-    запросы. SVG же отрисовывается сразу в HTML и работает везде.
+    Корень — самый связанный концепт (макс degree), под ним BFS-уровни:
+    соседи корня → их соседи → … Tree-edges (родитель → ребёнок) рисуются
+    плавными кривыми. Боковые связи (cross-edges, между родственниками не
+    через родителя) — тонкими пунктирными серыми линиями, чтобы было видно
+    дополнительные связи без визуального шума.
+
+    `st.graphviz_chart` ломается за tunnel'ами вроде lhr.life/ngrok, потому
+    что streamlit-компонент графа подгружает свой JS как ES-module, а
+    прокси режут такие запросы. SVG рендерится сразу в HTML и работает
+    везде.
     """
-    if not узлы:
+    if not узлы or not adj:
         return "<div style='color:#525252'>нет узлов для графа</div>"
 
-    ширина = 760
-    высота = 460
-    cx, cy = ширина / 2, высота / 2
-    радиус_центра = 110
-    радиус_края = 200
+    все_id = list(adj.keys())
 
-    хабы = [nid for nid in adj.keys() if degree.get(nid, 0) > 2]
-    листья = [nid for nid in adj.keys() if nid not in хабы]
+    # 1. Корень — узел с максимальной степенью. При равенстве — первый по списку.
+    корень = max(все_id, key=lambda nid: (degree.get(nid, 0), -все_id.index(nid)))
 
+    # 2. BFS от корня. Соседей берём в порядке убывания степени, чтобы хабы
+    # шли левее и тянули за собой больше «детей».
+    посещённые: set[str] = {корень}
+    родители: dict[str, str | None] = {корень: None}
+    дети_по_родителю: dict[str, list[str]] = {корень: []}
+    уровни: dict[int, list[str]] = {0: [корень]}
+    очередь: list[tuple[str, int]] = [(корень, 0)]
+    while очередь:
+        узел, lvl = очередь.pop(0)
+        соседи = sorted(adj.get(узел, []), key=lambda n: -degree.get(n, 0))
+        for сосед in соседи:
+            if сосед not in посещённые:
+                посещённые.add(сосед)
+                родители[сосед] = узел
+                дети_по_родителю.setdefault(узел, []).append(сосед)
+                дети_по_родителю.setdefault(сосед, [])
+                уровни.setdefault(lvl + 1, []).append(сосед)
+                очередь.append((сосед, lvl + 1))
+
+    # Изолированные узлы (не достижимы из корня) кладём отдельным «уровнем».
+    изолированные = [n for n in все_id if n not in посещённые]
+    if изолированные:
+        n_max = max(уровни.keys())
+        уровни[n_max + 1] = изолированные
+        for n in изолированные:
+            родители[n] = None
+            дети_по_родителю.setdefault(n, [])
+
+    n_уровней = max(уровни.keys()) + 1
+
+    # 3. Размер холста. Высота растёт с глубиной, ширина с числом узлов на
+    # самом широком уровне.
+    максимум_на_уровне = max(len(уровни[i]) for i in уровни) or 1
+    ширина = max(720, 160 * максимум_на_уровне)
+    высота = max(360, 140 + 130 * (n_уровней - 1))
+    отступ_сверху = 60
+    отступ_снизу = 40
+    шаг_y = ((высота - отступ_сверху - отступ_снизу) / (n_уровней - 1)) if n_уровней > 1 else 0
+
+    # 4. Позиции. Чтобы дети не разъезжались относительно родителей, на каждом
+    # уровне сортируем узлы по x их родителя; потом расставляем равномерно.
     положения: dict[str, tuple[float, float]] = {}
-    if not хабы:
-        for i, nid in enumerate(листья):
-            угол = 2 * math.pi * i / max(1, len(листья))
-            положения[nid] = (cx + радиус_края * math.cos(угол),
-                              cy + радиус_края * math.sin(угол))
-    else:
-        for i, nid in enumerate(хабы):
-            угол = 2 * math.pi * i / max(1, len(хабы))
-            положения[nid] = (cx + радиус_центра * math.cos(угол),
-                              cy + радиус_центра * math.sin(угол))
-        for i, nid in enumerate(листья):
-            угол = 2 * math.pi * i / max(1, len(листья))
-            положения[nid] = (cx + радиус_края * math.cos(угол),
-                              cy + радиус_края * math.sin(угол))
+    положения[корень] = (ширина / 2, отступ_сверху)
+    for lvl_idx in range(1, n_уровней):
+        узлы_lvl = уровни.get(lvl_idx, [])
+        if not узлы_lvl:
+            continue
+        # Сортируем по x родителя (None → центр)
+        узлы_lvl.sort(key=lambda n: положения.get(родители.get(n) or "", (ширина / 2,))[0])
+        n = len(узлы_lvl)
+        y = отступ_сверху + lvl_idx * шаг_y
+        for i, nid in enumerate(узлы_lvl):
+            x = ширина * (i + 1) / (n + 1)
+            положения[nid] = (x, y)
+
+    # 5. Группируем все edges на tree (родитель → ребёнок) и cross (всё остальное).
+    tree_keys: set[tuple[str, str]] = set()
+    for ребёнок, родитель in родители.items():
+        if родитель is not None:
+            tree_keys.add(tuple(sorted((ребёнок, родитель))))
+
+    cross_keys: set[tuple[str, str]] = set()
+    for ребро in рёбра:
+        s = str(ребро.get("source", ""))
+        t = str(ребро.get("target", ""))
+        if s not in положения or t not in положения or s == t:
+            continue
+        ключ = tuple(sorted((s, t)))
+        if ключ in tree_keys:
+            continue
+        cross_keys.add(ключ)
 
     куски = [
         f'<svg viewBox="0 0 {ширина} {высота}" xmlns="http://www.w3.org/2000/svg" '
@@ -643,34 +702,44 @@ def _построить_svg_граф(узлы, рёбра, adj, id2label, degree
         'border:1px solid #262626">'
     ]
 
-    нарисованные: set[tuple[str, str]] = set()
-    for ребро in рёбра:
-        s = str(ребро.get("source", ""))
-        t = str(ребро.get("target", ""))
-        if s not in положения or t not in положения:
-            continue
-        ключ = tuple(sorted((s, t)))
-        if ключ in нарисованные:
-            continue
-        нарисованные.add(ключ)
+    # 6. Сначала рисуем cross-edges (тонкий серый пунктир, под основой).
+    for s, t in cross_keys:
         x1, y1 = положения[s]
         x2, y2 = положения[t]
         куски.append(
             f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
-            'stroke="#4b5563" stroke-width="1.5" />'
+            'stroke="#374151" stroke-width="1" stroke-dasharray="3,4" '
+            'opacity="0.7" />'
         )
 
+    # 7. Tree edges — плавные кривые «родитель → ребёнок».
+    for ребёнок, родитель in родители.items():
+        if родитель is None:
+            continue
+        x1, y1 = положения[родитель]
+        x2, y2 = положения[ребёнок]
+        cy1 = y1 + (y2 - y1) * 0.55
+        cy2 = y1 + (y2 - y1) * 0.45
+        куски.append(
+            f'<path d="M {x1:.1f} {y1:.1f} '
+            f'C {x1:.1f} {cy1:.1f}, {x2:.1f} {cy2:.1f}, {x2:.1f} {y2:.1f}" '
+            'stroke="#3b82f6" stroke-width="2" fill="none" opacity="0.9" />'
+        )
+
+    # 8. Узлы. Корень крупнее и ярче, далее по degree.
     for nid, (x, y) in положения.items():
         deg = degree.get(nid, 0)
-        радиус = 28 if deg > 2 else 22
-        заливка = "#1e40af" if deg > 2 else "#1e3a8a"
+        является_корнем = (nid == корень)
+        радиус = 32 if является_корнем else (26 if deg > 2 else 21)
+        заливка = "#2563eb" if является_корнем else ("#1e40af" if deg > 2 else "#1e3a8a")
+        обводка = "#60a5fa" if является_корнем else "#3b82f6"
         ярлык = id2label.get(nid, nid)
-        if len(ярлык) > 14:
-            ярлык = ярлык[:13] + "…"
+        if len(ярлык) > 16:
+            ярлык = ярлык[:15] + "…"
         ярлык_xml = html.escape(ярлык, quote=True)
         куски.append(
             f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{радиус}" '
-            f'fill="{заливка}" stroke="#3b82f6" stroke-width="1.5" />'
+            f'fill="{заливка}" stroke="{обводка}" stroke-width="1.8" />'
         )
         куски.append(
             f'<text x="{x:.1f}" y="{y + 4:.1f}" fill="#f0f0f0" '
