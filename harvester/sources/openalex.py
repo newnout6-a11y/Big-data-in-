@@ -24,12 +24,30 @@ from .arxiv import Документ
 
 БАЗА = "https://api.openalex.org/works"
 
+# Расширенный список концептов — чем больше тем, тем больше пул ссылок,
+# и парсер не упирается в "кончились новые" даже после многих прогонов.
+# ID берутся из https://api.openalex.org/concepts.
 КОНЦЕПТЫ_ПО_УМОЛЧАНИЮ = {
     "C2780791683": "cheminformatics",
     "C119857082": "machine_learning",
     "C185592680": "chemistry",
     "C192562407": "materials_science",
     "C41008148": "computer_science",
+    "C121332964": "physics",
+    "C86803240": "biology",
+    "C39432304": "environmental_science",
+    "C71924100": "medicine",
+    "C33923547": "mathematics",
+    "C154945302": "artificial_intelligence",
+    "C2522767166": "data_science",
+    "C124101348": "data_mining",
+    "C8010536": "natural_language_processing",
+    "C153294291": "computational_chemistry",
+    "C111919701": "bioinformatics",
+    "C147597530": "computational_biology",
+    "C161191863": "information_systems",
+    "C42935608": "chemical_engineering",
+    "C159985019": "biotechnology",
 }
 
 

@@ -21,7 +21,25 @@ from .arxiv import Документ
 
 БАЗА = "https://api.stackexchange.com/2.3"
 
-САЙТЫ_ПО_УМОЛЧАНИЮ = ["chemistry", "ai", "datascience", "cs"]
+САЙТЫ_ПО_УМОЛЧАНИЮ = [
+    # химия и около-химия
+    "chemistry",
+    "physics",
+    "biology",
+    # AI / ML / data
+    "ai",
+    "datascience",
+    "stats",
+    # general CS / math
+    "cs",
+    "math",
+    "mathoverflow",
+    "cstheory",
+    "scicomp",
+    # softdev
+    "stackoverflow",
+    "codereview",
+]
 
 
 _HTML_TAG = re.compile(r"<[^>]+>")

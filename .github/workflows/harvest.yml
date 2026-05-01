@@ -38,7 +38,7 @@ on:
         default: "500"
       sources:
         description: "Источники через запятую"
-        default: "arxiv,openalex,europepmc,stackexchange,semanticscholar,core"
+        default: "arxiv,openalex,europepmc,stackexchange,semanticscholar,chemrxiv,core"
       year_min:
         description: "Минимальный год публикации"
         default: "2020"
@@ -126,7 +126,7 @@ jobs:
           python -m harvester.harvest_full \
             --budget "${{ github.event.inputs.budget || '500' }}" \
             --year-min "${{ github.event.inputs.year_min || '2020' }}" \
-            --sources "${{ github.event.inputs.sources || 'arxiv,openalex,europepmc,stackexchange,semanticscholar,core' }}" \
+            --sources "${{ github.event.inputs.sources || 'arxiv,openalex,europepmc,stackexchange,semanticscholar,chemrxiv,core' }}" \
             --email "${{ secrets.HARVESTER_EMAIL }}" \
             --time-limit-min 300 \
             "${ARGS[@]}"
