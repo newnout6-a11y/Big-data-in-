@@ -3,6 +3,7 @@
 app.py импортирует отсюда готовые функции и не содержит ни одной строки CSS/HTML.
 """
 
+import html
 import re
 import streamlit as st
 import streamlit.components.v1 as _components
@@ -1056,9 +1057,24 @@ def показать_статистику_поиска(статистика):
     if not статистика:
         return
 
-    режим = статистика.get("режим") or "поиск"
-    тетрадь = статистика.get("тетрадь") or "не выбрана"
-    qdrant_статус = статистика.get("qdrant_статус") or ""
+    def _экранировать(значение):
+        return html.escape(str(значение or ""), quote=True)
+
+    def _процент(значение):
+        try:
+            return max(0, min(100, int(float(значение))))
+        except (TypeError, ValueError):
+            return 0
+
+    def _номер_этапа(значение):
+        try:
+            return f"{int(значение):02d}"
+        except (TypeError, ValueError):
+            return "00"
+
+    режим = _экранировать(статистика.get("режим") or "поиск")
+    тетрадь = _экранировать(статистика.get("тетрадь") or "не выбрана")
+    qdrant_статус = _экранировать(статистика.get("qdrant_статус") or "")
     карточки = [
         (статистика.get("мои_файлы", 0), "мои файлы"),
         (статистика.get("страницы_слайды", 0), "стр. / слайды"),
@@ -1068,47 +1084,47 @@ def показать_статистику_поиска(статистика):
     ]
     карточки_html = "".join(
         f"<div style='border:1px solid var(--border);border-radius:10px;padding:1rem;background:var(--bg-soft)'>"
-        f"<div style='font-size:1.55rem;font-weight:700;line-height:1;color:var(--text)'>{значение}</div>"
+        f"<div style='font-size:1.55rem;font-weight:700;line-height:1;color:var(--text)'>{_экранировать(значение)}</div>"
         f"<div style='font-family:\"Geist Mono\",monospace;font-size:0.62rem;text-transform:uppercase;"
-        f"letter-spacing:0.16em;color:var(--text-dim);margin-top:0.65rem'>{подпись}</div>"
+        f"letter-spacing:0.16em;color:var(--text-dim);margin-top:0.65rem'>{_экранировать(подпись)}</div>"
         f"</div>"
         for значение, подпись in карточки
     )
     темы_html = "".join(
         f"<span style='display:inline-flex;border:1px solid #2f5f9f;border-radius:999px;"
-        f"padding:0.25rem 0.55rem;margin:0 0.4rem 0.45rem 0;color:#dbeafe'>{тема}</span>"
+        f"padding:0.25rem 0.55rem;margin:0 0.4rem 0.45rem 0;color:#dbeafe'>{_экранировать(тема)}</span>"
         for тема in статистика.get("темы", [])
     ) or "<span style='color:var(--text-dim)'>темы появятся после индексации документов</span>"
     связи_html = "".join(
         f"<div style='display:grid;grid-template-columns:3.5rem 1fr auto;gap:0.75rem;align-items:center;"
         f"border-top:1px solid var(--border);padding:0.8rem 0'>"
-        f"<span style='font-family:\"Geist Mono\",monospace;color:#93c5fd'>{связь.get('score', '')}</span>"
-        f"<strong>{связь.get('title', '')}</strong>"
-        f"<span style='color:var(--text-dim);font-size:0.85rem'>{связь.get('why', '')}</span>"
+        f"<span style='font-family:\"Geist Mono\",monospace;color:#93c5fd'>{_экранировать(связь.get('score', ''))}</span>"
+        f"<strong>{_экранировать(связь.get('title', ''))}</strong>"
+        f"<span style='color:var(--text-dim);font-size:0.85rem'>{_экранировать(связь.get('why', ''))}</span>"
         f"</div>"
         for связь in статистика.get("связанные", [])
     ) or "<div style='color:var(--text-dim);border-top:1px solid var(--border);padding-top:0.8rem'>связанные документы появятся после поиска</div>"
     диагностика_html = "".join(
         f"<div style='display:grid;grid-template-columns:3.5rem 1fr auto;gap:0.75rem;align-items:center;"
         f"border-top:1px solid var(--border);padding:0.8rem 0'>"
-        f"<span style='font-family:\"Geist Mono\",monospace;color:#93c5fd'>{пункт.get('score', '')}</span>"
-        f"<strong>{пункт.get('title', '')}</strong>"
-        f"<span style='color:var(--text-dim);font-size:0.85rem'>{пункт.get('why', '')}</span>"
+        f"<span style='font-family:\"Geist Mono\",monospace;color:#93c5fd'>{_экранировать(пункт.get('score', ''))}</span>"
+        f"<strong>{_экранировать(пункт.get('title', ''))}</strong>"
+        f"<span style='color:var(--text-dim);font-size:0.85rem'>{_экранировать(пункт.get('why', ''))}</span>"
         f"</div>"
         for пункт in статистика.get("диагностика", [])
     )
     источники_html = "".join(
         f"<div style='display:grid;grid-template-columns:10rem 1fr;gap:1rem;align-items:center;margin:0.65rem 0'>"
-        f"<span style='color:var(--text-muted)'>{имя}</span>"
+        f"<span style='color:var(--text-muted)'>{_экранировать(имя)}</span>"
         f"<span style='height:4px;border-radius:999px;background:linear-gradient(90deg,#60a5fa,#86efac);"
-        f"width:{ширина}%;display:block'></span></div>"
+        f"width:{_процент(ширина)}%;display:block'></span></div>"
         for имя, ширина in статистика.get("источники", [])
     )
     пайплайн_html = "".join(
         f"<div style='border:1px solid var(--border);border-radius:8px;padding:0.85rem;background:#0d0d0d'>"
         f"<div style='font-family:\"Geist Mono\",monospace;color:var(--text-dim);font-size:0.62rem'>"
-        f"{номер:02d}</div><strong>{заголовок}</strong>"
-        f"<div style='color:var(--text-dim);font-size:0.85rem;margin-top:0.35rem'>{описание}</div></div>"
+        f"{_номер_этапа(номер)}</div><strong>{_экранировать(заголовок)}</strong>"
+        f"<div style='color:var(--text-dim);font-size:0.85rem;margin-top:0.35rem'>{_экранировать(описание)}</div></div>"
         for номер, заголовок, описание in статистика.get("пайплайн", [])
     )
     html = (
