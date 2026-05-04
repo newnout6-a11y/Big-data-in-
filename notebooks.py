@@ -187,8 +187,32 @@ def ingest_uploaded_files(
                     save_images=True,
                     on_progress=on_progress,
                 )
-                pages = [{"page": p["page"], "text": p["text"]} for p in visual_pages]
+                # Параллельно достаём встроенные диаграммы/картинки. Иначе при
+                # включённом visual_mode поиск отдаёт только текст: рендер целой
+                # страницы из `визуальная_обработка` нигде в выдаче не выводится.
+                images_by_page = _извлечь_встроенные_картинки_по_страницам(target)
+                pages = [
+                    {
+                        "page": p["page"],
+                        "text": p["text"],
+                        "images": images_by_page.get(p["page"], []),
+                    }
+                    for p in visual_pages
+                ]
                 visual_meta_by_page = {p["page"]: p for p in visual_pages}
+                # Страницы, на которых визуальная обработка не дала текста, но
+                # есть встроенные картинки — добавляем как «визуальные» чанки,
+                # чтобы их можно было поднять через индекс соседних страниц.
+                visual_page_numbers = {p["page"] for p in visual_pages}
+                for номер_страницы, картинки in images_by_page.items():
+                    if номер_страницы in visual_page_numbers or not картинки:
+                        continue
+                    pages.append({
+                        "page": номер_страницы,
+                        "text": "",
+                        "images": картинки,
+                    })
+                pages.sort(key=lambda элемент: элемент["page"])
                 summary["ocr_pages"] += sum(
                     1 for p in visual_pages if p.get("tier_used") == 1)
                 summary["groq_vision_pages"] += sum(
@@ -438,11 +462,22 @@ def build_chunks(
     for page in pages:
         page_no = page["page"]
         text = clean_text(page["text"])
-        if len(text) < 50:
+        page_images = list(page.get("images") or [])
+        # Страница без осмысленного текста и без картинок — выкидываем.
+        # Раньше выкидывали все страницы с text < 50 символов, и тогда диаграммы
+        # с короткой подписью («схема:», «рис. 1») сохранялись на диск, но
+        # ни в один чанк не попадали — поиск их не видел.
+        if len(text) < 50 and not page_images:
             continue
         meta = visual_meta_by_page.get(page_no, {})
-        page_images = list(page.get("images") or [])
-        for chunk_index, chunk_text in enumerate(_split_text(text), 1):
+        text_pieces = _split_text(text)
+        if not text_pieces and page_images:
+            # На странице есть встроенные изображения, но текст слишком короткий
+            # для `_split_text`. Эмитим один чанк с тем, что есть, чтобы
+            # картинки попали и в свой payload, и в индекс соседних страниц.
+            placeholder = text or f"[Страница {page_no}: изображение]"
+            text_pieces = [placeholder]
+        for chunk_index, chunk_text in enumerate(text_pieces, 1):
             text_hash = hashlib.sha1(chunk_text.encode("utf-8", errors="ignore")).hexdigest()
             chunks.append({
                 "text": chunk_text,
@@ -616,6 +651,33 @@ def _extract_pdf(path: Path) -> list[dict[str, Any]]:
     except Exception:
         return []
     return pages
+
+
+def _извлечь_встроенные_картинки_по_страницам(path: Path) -> dict[int, list[dict[str, Any]]]:
+    """Сохраняет встроенные в PDF картинки и возвращает индекс `page -> [images]`.
+
+    Используется в `ingest_uploaded_files`, когда `visual_mode=True`: визуальная
+    обработка возвращает только текст, поэтому без отдельного прохода по PDF
+    встроенные диаграммы не попадают в payload чанков, и поиск отдаёт только
+    текст. Формат элементов совпадает с `_извлечь_картинки_страницы`.
+    """
+    if fitz is None:
+        return {}
+    file_hash = _file_hash(path)
+    images_dir = EXTRACTED_IMAGES_DIR / file_hash
+    индекс: dict[int, list[dict[str, Any]]] = {}
+    try:
+        doc = fitz.open(path)
+    except Exception:
+        return {}
+    try:
+        for index, page in enumerate(doc, start=1):
+            картинки = _извлечь_картинки_страницы(doc, page, index, images_dir)
+            if картинки:
+                индекс[index] = картинки
+    finally:
+        doc.close()
+    return индекс
 
 
 def _file_hash(path: Path) -> str:
