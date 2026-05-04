@@ -6,12 +6,20 @@
 
 Старые коллекции (`химия`, `knowledge`) не трогаются — приложение умеет
 работать как с гибридной, так и с устаревшими.
+
+Идемпотентность: ID точек в Qdrant вычисляется как UUIDv5 от text_hash.
+Это даёт два преимущества:
+  1. Перезапуск после частичной записи не дублирует данные и не ломает
+     уже загруженные точки (повторный upsert = no-op).
+  2. Если chunks_v2.jsonl перегенерировали (например, --full), порядок
+     не важен — каждый чанк всегда попадает на свой стабильный ID.
 """
 from __future__ import annotations
 
 import json
 import os
 import sys
+import uuid
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -84,6 +92,40 @@ def подключиться():
     return клиент
 
 
+def _id_для_чанка(чанк: dict) -> str:
+    """Стабильный UUIDv5 от text_hash. Один и тот же текст всегда даёт один id."""
+    text_hash = чанк.get("text_hash") or ""
+    if not text_hash:
+        # На всякий случай — fallback на хэш самого текста, чтобы не падать.
+        # ingest_v2 всегда выставляет text_hash, поэтому в норме сюда не зайдём.
+        import hashlib
+        text_hash = hashlib.sha1(
+            (чанк.get("text") or "").encode("utf-8", errors="ignore")
+        ).hexdigest()
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, text_hash))
+
+
+def _существующие_text_hashes(клиент: QdrantClient, коллекция: str) -> set[str]:
+    """Сканирует коллекцию и возвращает множество text_hash уже загруженных точек."""
+    результат: set[str] = set()
+    offset = None
+    while True:
+        батч, offset = клиент.scroll(
+            collection_name=коллекция,
+            limit=512,
+            offset=offset,
+            with_payload=["text_hash"],
+            with_vectors=False,
+        )
+        for точка in батч:
+            text_hash = (точка.payload or {}).get("text_hash")
+            if text_hash:
+                результат.add(text_hash)
+        if offset is None:
+            break
+    return результат
+
+
 def main():
     if not os.path.exists(ФАЙЛ_ЧАНКОВ):
         print(f"Нет файла {ФАЙЛ_ЧАНКОВ}. Сначала запусти python ingest_v2.py")
@@ -101,7 +143,13 @@ def main():
                 все_чанки.append(json.loads(строка))
     print(f"Всего чанков в файле: {len(все_чанки)}")
 
-    осталось = все_чанки[в_базе:]
+    # Идемпотентность: дедуп по text_hash, а не по позиции в файле. Если хоть
+    # один upsert упал ранее — повторный запуск догрузит ровно то, чего нет в
+    # коллекции, не дублируя и не перезатирая полезные точки.
+    existing = _существующие_text_hashes(клиент, КОЛЛЕКЦИЯ) if в_базе else set()
+    if existing:
+        print(f"Уже в коллекции (по text_hash): {len(existing)}")
+    осталось = [ч for ч in все_чанки if ч.get("text_hash") not in existing]
     print(f"Осталось загрузить: {len(осталось)}")
     if not осталось:
         return 0
@@ -109,7 +157,7 @@ def main():
     модель = SentenceTransformer("intfloat/multilingual-e5-base")
     print("Модель dense загружена")
 
-    текущий = в_базе
+    загружено = 0
     for старт in range(0, len(осталось), РАЗМЕР_БАТЧА):
         батч = осталось[старт:старт + РАЗМЕР_БАТЧА]
         тексты = [ч["text"] for ч in батч]
@@ -124,20 +172,19 @@ def main():
         for i, чанк in enumerate(батч):
             idx, val = sparse_пары[i]
             точки.append(PointStruct(
-                id=текущий,
+                id=_id_для_чанка(чанк),
                 vector={
                     "dense": векторы[i].tolist(),
                     "sparse": SparseVector(indices=idx, values=val),
                 },
                 payload=чанк,
             ))
-            текущий += 1
 
         клиент.upsert(collection_name=КОЛЛЕКЦИЯ, points=точки)
+        загружено += len(батч)
 
         if (старт // РАЗМЕР_БАТЧА + 1) % 10 == 0 or старт + РАЗМЕР_БАТЧА >= len(осталось):
-            готово = в_базе + min(старт + РАЗМЕР_БАТЧА, len(осталось))
-            print(f"  Загружено: {готово}/{len(все_чанки)}")
+            print(f"  Загружено: {загружено}/{len(осталось)}")
 
     финал = клиент.count(КОЛЛЕКЦИЯ, exact=True).count
     print(f"\nГотово. В коллекции {КОЛЛЕКЦИЯ}: {финал} точек")

@@ -4,7 +4,7 @@ import re
 import json
 import mimetypes
 import html
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
@@ -22,7 +22,6 @@ import notebooks
 import study_tools
 import визуальная_обработка as виз
 from cases import кейсы, получить_название_кейса
-from fallback_answers import заготовленные_ответы
 from taxonomy import ДОМЕНЫ, название_домена, название_субдомена
 from классификатор import (
     подготовить_прототипы,
@@ -311,7 +310,7 @@ def _recency_boost(год, λ=0.0667):
     """Множитель свежести: статья этого года → 1.0, на 5 лет старше → ~0.72."""
     if not год:
         return 1.0
-    разница = max(0, datetime.utcnow().year - int(год))
+    разница = max(0, datetime.now(timezone.utc).year - int(год))
     return math.exp(-λ * разница)
 
 
@@ -477,6 +476,82 @@ def получить_ответ_от_groq(вопрос, фрагменты):
     return текст
 
 
+def обогатить_картинками_соседних_страниц(фрагменты, *, окно: int = 2) -> None:
+    """Добавляет в каждый фрагмент `images_neighbors` — картинки с
+    соседних страниц того же документа из других чанков той же тетради.
+
+    Работает только для фрагментов, у которых известны `notebook_id` и
+    `file_hash`. Для каждого фрагмента с пустым `images` ищет в коллекции
+    тетради чанки на странице ±`окно` и подставляет их картинки.
+
+    Идемпотентно: если у фрагмента уже есть `images_neighbors`, повторно не
+    обновляет его. Если поиск завершается ошибкой — молча пропускает.
+    """
+    if not фрагменты:
+        return
+    группы: dict[tuple[str, str], list[dict]] = {}
+    for фр in фрагменты:
+        nid = фр.get("notebook_id")
+        fh = фр.get("file_hash")
+        if not nid or not fh:
+            continue
+        if фр.get("images") or фр.get("images_neighbors"):
+            continue
+        uid = фр.get("user_id") or пользователь_id
+        группы.setdefault((uid, nid), []).append(фр)
+
+    if not группы:
+        return
+
+    try:
+        клиент = загрузить_qdrant()
+    except Exception:
+        return
+
+    for (uid, nid), bucket in группы.items():
+        try:
+            store = notebooks.load_store(uid)
+        except Exception:
+            continue
+        ноутбуки = store.get("users", {}).get(uid, {}).get("notebooks", [])
+        тетрадь = next((nb for nb in ноутбуки if nb.get("id") == nid), None)
+        if тетрадь is None:
+            continue
+        file_hashes = {фр.get("file_hash") for фр in bucket if фр.get("file_hash")}
+        if not file_hashes:
+            continue
+        try:
+            индекс = notebooks.собрать_картинки_по_страницам(
+                клиент, тетрадь, file_hashes, user_id=uid,
+            )
+        except Exception:
+            continue
+        if not индекс:
+            continue
+        for фр in bucket:
+            fh = фр.get("file_hash")
+            try:
+                page = int(фр.get("page"))
+            except (TypeError, ValueError):
+                continue
+            if not fh or page <= 0:
+                continue
+            соседи: list[dict] = []
+            видели: set[str] = set()
+            for delta in range(1, окно + 1):
+                for сторона in (-delta, delta):
+                    for img in индекс.get((fh, page + сторона), []):
+                        путь = img.get("path") or ""
+                        if not путь or путь in видели:
+                            continue
+                        видели.add(путь)
+                        соседи.append(img)
+                if соседи:
+                    break
+            if соседи:
+                фр["images_neighbors"] = соседи
+
+
 def сериализовать_фрагменты(точки):
     фрагменты = []
     for т in точки:
@@ -555,23 +630,36 @@ def _локальный_путь_картинки(путь_картинки):
     return None
 
 
-def показать_картинки_фрагмента(фр, key_prefix):
-    картинки = фр.get("images") or []
+def _собрать_доступные_картинки(картинки, текущая_страница):
     if not isinstance(картинки, list):
-        return
+        return []
     доступные = []
     for картинка in картинки:
         if not isinstance(картинка, dict):
             continue
         путь = _локальный_путь_картинки(картинка.get("path"))
         if путь:
-            доступные.append((путь, картинка.get("page") or фр.get("page")))
-    if not доступные:
-        return
+            доступные.append((путь, картинка.get("page") or текущая_страница))
+    return доступные
 
-    st.markdown("**Изображения со страницы:**")
-    колонки = st.columns(min(3, len(доступные)), gap="small")
-    for индекс, (путь, страница) in enumerate(доступные):
+
+def показать_картинки_фрагмента(фр, key_prefix):
+    собственные = _собрать_доступные_картинки(фр.get("images"), фр.get("page"))
+    if собственные:
+        заголовок = "**Изображения со страницы:**"
+        список = собственные
+    else:
+        соседние = _собрать_доступные_картинки(
+            фр.get("images_neighbors"), фр.get("page")
+        )
+        if not соседние:
+            return
+        заголовок = "**Изображения с соседних страниц:**"
+        список = соседние
+
+    st.markdown(заголовок)
+    колонки = st.columns(min(3, len(список)), gap="small")
+    for индекс, (путь, страница) in enumerate(список):
         with колонки[индекс % len(колонки)]:
             st.image(
                 str(путь),
@@ -1337,27 +1425,50 @@ def извлечь_формулы(текст):
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": (
-                    "Ты извлекаешь математические формулы из научного текста и конвертируешь их в корректный LaTeX.\n\n"
-                    "Правила:\n"
-                    "1. Найди все содержательные математические выражения: уравнения, функции, суммы, интегралы, нормы, вероятности, операторы argmin/argmax.\n"
-                    "2. Игнорируй простые числа, единицы измерения, ссылки на литературу [12].\n"
-                    "3. Каждую формулу ОБЯЗАТЕЛЬНО перепиши в корректном LaTeX-синтаксисе. Не копируй Unicode-символы!\n\n"
-                    "Конвертация Unicode → LaTeX:\n"
-                    "Σ, ∑ → \\\\sum    ∏ → \\\\prod    ∫ → \\\\int    ∈ → \\\\in    ∉ → \\\\notin\n"
-                    "≤ → \\\\leq    ≥ → \\\\geq    ≠ → \\\\neq    ≈ → \\\\approx    ∞ → \\\\infty\n"
-                    "α β γ → \\\\alpha \\\\beta \\\\gamma    θ → \\\\theta    σ → \\\\sigma    μ → \\\\mu\n"
-                    "∗ · × → \\\\cdot    → → \\\\to    ∂ → \\\\partial    ∇ → \\\\nabla\n"
-                    "Подстрочные: x_1, iref → i_{ref}, xopt → x_{opt}\n"
-                    "Надстрочные: x^2, e^{-t}\n"
-                    "argmin → \\\\arg\\\\min    argmax → \\\\arg\\\\max\n"
-                    "Модуль |x| → |x|    Норма ||x|| → \\\\|x\\\\|\n\n"
-                    "Примеры правильной конвертации:\n"
-                    "'f(x) = Σ m∈IQA w(m)∗|m(ix)−m(iref)|' → 'f(x) = \\\\sum_{m \\\\in IQA} w(m) \\\\cdot |m(i_x) - m(i_{ref})|'\n"
-                    "'xopt ∈ argmin x∈X f(x)' → 'x_{opt} \\\\in \\\\arg\\\\min_{x \\\\in X} f(x)'\n"
-                    "'E = mc^2' → 'E = mc^2'\n\n"
-                    "Ответ строго JSON: {\"formulas\": [{\"latex\": \"...\", \"описание\": \"...\"}]}.\n"
-                    "Описание на русском, коротко: что это за формула и что означают переменные.\n"
-                    "Если формул нет — {\"formulas\": []}. Не придумывай."
+                    "Ты извлекаешь математические формулы из научного текста "
+                    "и переписываешь их в корректном LaTeX.\n\n"
+                    "ЧТО ИЗВЛЕКАТЬ:\n"
+                    "— уравнения, функции, суммы/произведения/интегралы, "
+                    "нормы, вероятности, argmin/argmax, операторы.\n\n"
+                    "ЧТО ИГНОРИРОВАТЬ:\n"
+                    "— одиночные числа, единицы измерения, ссылки на "
+                    "литературу типа [12], даты, диапазоны страниц.\n\n"
+                    "ПРАВИЛА LaTeX:\n"
+                    "— все Unicode-символы заменяй на их LaTeX-эквиваленты "
+                    "(см. таблицу ниже). НЕ оставляй греческие буквы, ∑, ∫, "
+                    "≤, ∞ как символы — только командами.\n"
+                    "— подстрочный индекс: одна буква x_1; несколько символов "
+                    "в фигурных скобках: i_{ref}, x_{opt}.\n"
+                    "— надстрочный: x^2, e^{-t/\\tau}.\n"
+                    "— argmin/argmax: \\arg\\min, \\arg\\max.\n"
+                    "— модуль |x|; норма \\|x\\|.\n\n"
+                    "ТАБЛИЦА КОНВЕРТАЦИИ:\n"
+                    "  ∑ Σ (оператор суммы) → \\sum\n"
+                    "  Σ (матрица/множество, в обозначении) → \\Sigma\n"
+                    "  ∏ → \\prod   ∫ → \\int   ∮ → \\oint\n"
+                    "  ∈ → \\in   ∉ → \\notin   ⊂ → \\subset   ⊆ → \\subseteq\n"
+                    "  ≤ → \\leq   ≥ → \\geq   ≠ → \\neq   ≈ → \\approx   ≡ → \\equiv\n"
+                    "  ∞ → \\infty   → → \\to   ↦ → \\mapsto   ⇒ → \\Rightarrow\n"
+                    "  α β γ δ ε → \\alpha \\beta \\gamma \\delta \\varepsilon\n"
+                    "  θ λ μ ν ξ → \\theta \\lambda \\mu \\nu \\xi\n"
+                    "  π σ τ φ ψ ω → \\pi \\sigma \\tau \\varphi \\psi \\omega\n"
+                    "  ∂ → \\partial   ∇ → \\nabla   √ → \\sqrt{}\n"
+                    "  · ∗ → \\cdot   × → \\times   ÷ → \\div   ± → \\pm\n"
+                    "  − (Unicode-минус) → -   ′ → '   ° → ^\\circ\n\n"
+                    "ПРИМЕРЫ:\n"
+                    "  'f(x) = Σ m∈IQA w(m)·|m(ix)−m(iref)|' → "
+                    "'f(x) = \\sum_{m \\in IQA} w(m) \\cdot |m(i_x) - m(i_{ref})|'\n"
+                    "  'xopt ∈ argmin x∈X f(x)' → "
+                    "'x_{opt} \\in \\arg\\min_{x \\in X} f(x)'\n"
+                    "  'P(A∩B) = P(A)·P(B)' → 'P(A \\cap B) = P(A) \\cdot P(B)'\n"
+                    "  'E = mc^2' → 'E = mc^2'  (уже корректный LaTeX)\n\n"
+                    "ФОРМАТ ОТВЕТА — строго JSON:\n"
+                    "  {\"formulas\": [{\"latex\": \"...\", \"описание\": \"...\"}]}\n"
+                    "Внутри строки 'latex' каждый обратный слэш экранируй "
+                    "удвоением, как в любом JSON: '\\sum' пиши как \"\\\\sum\".\n"
+                    "'описание' — на русском, 1–2 предложения: что за формула "
+                    "и что означают переменные.\n"
+                    "Если формул нет — {\"formulas\": []}. Не выдумывай."
                 )},
                 {"role": "user", "content": текст}
             ],
@@ -1495,7 +1606,7 @@ with вкладка1:
             with ф3:
                 выбор_года_от = st.number_input(
                     "Не раньше",
-                    min_value=1990, max_value=datetime.utcnow().year,
+                    min_value=1990, max_value=datetime.now(timezone.utc).year,
                     value=2018, step=1,
                 )
             with ф4:
@@ -1659,7 +1770,7 @@ with вкладка1:
     elif результат and результат["тип"] == "rag":
         ответ = результат["ответ"]
         фрагменты = результат["фрагменты"]
-
+        обогатить_картинками_соседних_страниц(фрагменты)
 
         есть_маркеры = bool(re.search(r"\[\d+\]", ответ))
 

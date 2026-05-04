@@ -187,8 +187,32 @@ def ingest_uploaded_files(
                     save_images=True,
                     on_progress=on_progress,
                 )
-                pages = [{"page": p["page"], "text": p["text"]} for p in visual_pages]
+                # Параллельно достаём встроенные диаграммы/картинки. Иначе при
+                # включённом visual_mode поиск отдаёт только текст: рендер целой
+                # страницы из `визуальная_обработка` нигде в выдаче не выводится.
+                images_by_page = _извлечь_встроенные_картинки_по_страницам(target)
+                pages = [
+                    {
+                        "page": p["page"],
+                        "text": p["text"],
+                        "images": images_by_page.get(p["page"], []),
+                    }
+                    for p in visual_pages
+                ]
                 visual_meta_by_page = {p["page"]: p for p in visual_pages}
+                # Страницы, на которых визуальная обработка не дала текста, но
+                # есть встроенные картинки — добавляем как «визуальные» чанки,
+                # чтобы их можно было поднять через индекс соседних страниц.
+                visual_page_numbers = {p["page"] for p in visual_pages}
+                for номер_страницы, картинки in images_by_page.items():
+                    if номер_страницы in visual_page_numbers or not картинки:
+                        continue
+                    pages.append({
+                        "page": номер_страницы,
+                        "text": "",
+                        "images": картинки,
+                    })
+                pages.sort(key=lambda элемент: элемент["page"])
                 summary["ocr_pages"] += sum(
                     1 for p in visual_pages if p.get("tier_used") == 1)
                 summary["groq_vision_pages"] += sum(
@@ -335,9 +359,9 @@ def notebook_fragments(
             with_vectors=False,
         )
         for point in batch:
-            payload = dict(point.payload or {})
-            payload["score"] = float(payload.get("score", 0.0) or 0.0)
-            points.append(payload)
+            # scroll'ом достаём фрагменты целиком (для UI «все документы тетради»),
+            # никакого score из retrieval тут нет — это не поиск, а перечисление.
+            points.append(dict(point.payload or {}))
         if offset is None:
             break
     points.sort(key=lambda item: (
@@ -346,6 +370,67 @@ def notebook_fragments(
         int(item.get("chunk_index") or 0),
     ))
     return points
+
+
+def собрать_картинки_по_страницам(
+    client: Any,
+    notebook: dict[str, Any],
+    file_hashes: set[str] | list[str],
+    *,
+    user_id: str | None = None,
+) -> dict[tuple[str, int], list[dict[str, Any]]]:
+    """Возвращает индекс `(file_hash, page) -> [images]` по коллекции тетради.
+
+    Скроллит коллекцию тетради с фильтром по user_id/notebook_id, оставляет
+    только чанки с непустым `images` и принадлежащие переданным `file_hashes`.
+    Дедуп картинок выполняется по полю `path` в пределах одной страницы.
+    """
+    user_id = user_id or get_user_id()
+    file_hashes = set(file_hashes or ())
+    if not file_hashes:
+        return {}
+    ensure_collection(client, notebook)
+    query_filter = Filter(must=[
+        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+        FieldCondition(key="notebook_id", match=MatchValue(value=notebook["id"])),
+    ])
+    результат: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    видели: dict[tuple[str, int], set[str]] = {}
+    offset = None
+    while True:
+        batch, offset = client.scroll(
+            collection_name=notebook["collection"],
+            scroll_filter=query_filter,
+            limit=128,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in batch:
+            payload = point.payload or {}
+            fh = payload.get("file_hash")
+            if not fh or fh not in file_hashes:
+                continue
+            картинки = payload.get("images") or []
+            if not isinstance(картинки, list) or not картинки:
+                continue
+            page = _int_page(payload.get("page"))
+            if page is None:
+                continue
+            ключ = (fh, page)
+            пути_видели = видели.setdefault(ключ, set())
+            список = результат.setdefault(ключ, [])
+            for картинка in картинки:
+                if not isinstance(картинка, dict):
+                    continue
+                путь = картинка.get("path") or ""
+                if not путь or путь in пути_видели:
+                    continue
+                пути_видели.add(путь)
+                список.append(картинка)
+        if offset is None:
+            break
+    return результат
 
 
 def extract_pages(path: Path) -> list[dict[str, Any]]:
@@ -377,11 +462,22 @@ def build_chunks(
     for page in pages:
         page_no = page["page"]
         text = clean_text(page["text"])
-        if len(text) < 50:
+        page_images = list(page.get("images") or [])
+        # Страница без осмысленного текста и без картинок — выкидываем.
+        # Раньше выкидывали все страницы с text < 50 символов, и тогда диаграммы
+        # с короткой подписью («схема:», «рис. 1») сохранялись на диск, но
+        # ни в один чанк не попадали — поиск их не видел.
+        if len(text) < 50 and not page_images:
             continue
         meta = visual_meta_by_page.get(page_no, {})
-        page_images = list(page.get("images") or [])
-        for chunk_index, chunk_text in enumerate(_split_text(text), 1):
+        text_pieces = _split_text(text)
+        if not text_pieces and page_images:
+            # На странице есть встроенные изображения, но текст слишком короткий
+            # для `_split_text`. Эмитим один чанк с тем, что есть, чтобы
+            # картинки попали и в свой payload, и в индекс соседних страниц.
+            placeholder = text or f"[Страница {page_no}: изображение]"
+            text_pieces = [placeholder]
+        for chunk_index, chunk_text in enumerate(text_pieces, 1):
             text_hash = hashlib.sha1(chunk_text.encode("utf-8", errors="ignore")).hexdigest()
             chunks.append({
                 "text": chunk_text,
@@ -557,8 +653,43 @@ def _extract_pdf(path: Path) -> list[dict[str, Any]]:
     return pages
 
 
+def _извлечь_встроенные_картинки_по_страницам(path: Path) -> dict[int, list[dict[str, Any]]]:
+    """Сохраняет встроенные в PDF картинки и возвращает индекс `page -> [images]`.
+
+    Используется в `ingest_uploaded_files`, когда `visual_mode=True`: визуальная
+    обработка возвращает только текст, поэтому без отдельного прохода по PDF
+    встроенные диаграммы не попадают в payload чанков, и поиск отдаёт только
+    текст. Формат элементов совпадает с `_извлечь_картинки_страницы`.
+    """
+    if fitz is None:
+        return {}
+    file_hash = _file_hash(path)
+    images_dir = EXTRACTED_IMAGES_DIR / file_hash
+    индекс: dict[int, list[dict[str, Any]]] = {}
+    try:
+        doc = fitz.open(path)
+    except Exception:
+        return {}
+    try:
+        for index, page in enumerate(doc, start=1):
+            картинки = _извлечь_картинки_страницы(doc, page, index, images_dir)
+            if картинки:
+                индекс[index] = картинки
+    finally:
+        doc.close()
+    return индекс
+
+
 def _file_hash(path: Path) -> str:
-    h = hashlib.sha1()
+    """SHA-256 от содержимого файла, поточно. Используется как подкаталог для
+    извлечённых картинок и для дедупа в payload (поле file_hash).
+
+    Раньше тут был SHA-1 — несогласованный с другими местами проекта,
+    которые считают SHA-256. Старые папки `extracted_images/<sha1>/` остаются
+    на диске и продолжают работать через сохранённые в payload пути; новые
+    загрузки идут уже под SHA-256.
+    """
+    h = hashlib.sha256()
     try:
         with path.open("rb") as f:
             for блок in iter(lambda: f.read(65536), b""):

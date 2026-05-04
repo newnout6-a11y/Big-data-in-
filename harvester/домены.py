@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
 
 
 # Химические маркеры — английские + русские корни

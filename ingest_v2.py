@@ -18,7 +18,7 @@ import hashlib
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import docx
 
@@ -362,7 +362,7 @@ def main(argv=None):
                     "language": язык,
                     "embed_model": EMBED_MODEL_TAG,
                     "text_hash": хэш_текста,
-                    "ingested_at": datetime.utcnow().strftime("%Y-%m-%d"),
+                    "ingested_at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                 }
                 выход.write(json.dumps(запись, ensure_ascii=False) + "\n")
                 счётчик_чанков += 1

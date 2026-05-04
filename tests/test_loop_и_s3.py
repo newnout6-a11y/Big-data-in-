@@ -1,10 +1,8 @@
 """Тесты для harvester.loop и harvester.s3_upload."""
 from __future__ import annotations
 
-import os
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from harvester import loop, s3_upload
 

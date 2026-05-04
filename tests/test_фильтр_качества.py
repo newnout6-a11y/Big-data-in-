@@ -1,8 +1,6 @@
 """Тесты фильтра качества PDF."""
 import os
-import tempfile
 
-import pytest
 
 import фильтр_качества as фк
 
