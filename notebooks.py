@@ -576,24 +576,132 @@ _CAPTION_REGEX = re.compile(
 )
 
 
-def _извлечь_подписи_со_страницы(текст: str) -> list[str]:
-    """Возвращает список подписей вида 'Fig. N …' / 'Рис. N …' в порядке
-    появления в тексте страницы. Используется для привязки подписей к
-    встроенным картинкам (по порядку)."""
+def _извлечь_подписи_со_страницы(текст: str) -> list[dict[str, str]]:
+    """Возвращает список подписей вида `{tag, num, prefix, body, full}` в
+    порядке появления в тексте страницы. `prefix` — короткая метка для
+    `page.search_for` (например 'Fig. 1'), `full` — полная читаемая подпись.
+    """
     if not текст:
         return []
-    подписи: list[str] = []
+    результат: list[dict[str, str]] = []
     for m in _CAPTION_REGEX.finditer(текст):
         tag = m.group("tag").strip().rstrip(".")
         num = m.group("num")
         body = m.group("body").strip()
-        # обрезаем до первой точки, если тело длинное
         if len(body) > 220:
             точка = body.find(". ")
             if 40 < точка < 220:
                 body = body[: точка + 1]
-        подписи.append(f"{tag} {num}. {body}")
-    return подписи
+        full = f"{tag} {num}. {body}"
+        # Префикс для поиска на странице — пробуем разные варианты,
+        # потому что в PDF может быть 'Fig. 1.', 'Fig 1', 'Figure 1.' и т.д.
+        prefix = f"{tag} {num}"
+        результат.append({
+            "tag": tag,
+            "num": num,
+            "prefix": prefix,
+            "body": body,
+            "full": full,
+        })
+    return результат
+
+
+def _bbox_подписи(страница: Any, подпись: dict[str, str]) -> tuple[float, float, float, float] | None:
+    """Возвращает bbox первого вхождения подписи на странице через
+    `page.search_for`. Возвращает None, если найти не удалось."""
+    кандидаты = [
+        f"{подпись['tag']}. {подпись['num']}",
+        f"{подпись['tag']} {подпись['num']}.",
+        f"{подпись['tag']} {подпись['num']}",
+    ]
+    for запрос in кандидаты:
+        try:
+            попадания = страница.search_for(запрос)
+        except Exception:
+            попадания = []
+        if попадания:
+            r = попадания[0]
+            return (float(r.x0), float(r.y0), float(r.x1), float(r.y1))
+    return None
+
+
+def _bbox_картинки(страница: Any, xref: int) -> tuple[float, float, float, float] | None:
+    """Возвращает bbox первого размещения картинки `xref` на странице."""
+    try:
+        прямоугольники = страница.get_image_rects(xref)
+    except Exception:
+        прямоугольники = []
+    if прямоугольники:
+        r = прямоугольники[0]
+        return (float(r.x0), float(r.y0), float(r.x1), float(r.y1))
+    return None
+
+
+def _привязать_подписи(
+    страница: Any,
+    xrefs_по_порядку: list[int],
+    подписи: list[dict[str, str]],
+) -> dict[int, str]:
+    """Возвращает `{xref → caption}` на основе геометрии страницы.
+
+    Алгоритм: для каждой подписи находим её Y-координату на странице через
+    `search_for`. Затем привязываем подпись к картинке, чей нижний край
+    физически ближе всего СВЕРХУ от подписи (типичная вёрстка: рисунок
+    сверху, подпись снизу). Если bbox найти не удалось — fallback к
+    привязке по порядку xref'ов.
+    """
+    результат: dict[int, str] = {}
+    if not подписи or not xrefs_по_порядку:
+        return результат
+
+    # Собираем bbox'ы картинок
+    bbox_картинок: list[tuple[int, tuple[float, float, float, float]]] = []
+    for xref in xrefs_по_порядку:
+        bbox = _bbox_картинки(страница, xref)
+        if bbox is not None:
+            bbox_картинок.append((xref, bbox))
+
+    # Если ни одной bbox-инфы нет — fallback к порядковой привязке
+    if not bbox_картинок:
+        for i, xref in enumerate(xrefs_по_порядку):
+            if i < len(подписи):
+                результат[xref] = подписи[i]["full"]
+        return результат
+
+    занятые: set[int] = set()
+    непривязанные_подписи: list[dict[str, str]] = []
+    for подпись in подписи:
+        bbox_п = _bbox_подписи(страница, подпись)
+        if bbox_п is None:
+            непривязанные_подписи.append(подпись)
+            continue
+        y_подписи = bbox_п[1]  # y0 = верхний край подписи
+        # Ищем картинку, нижний край которой ближе всего сверху к подписи.
+        лучший_xref: int | None = None
+        лучшее_расстояние = float("inf")
+        for xref, (_x0, _y0, _x1, y1) in bbox_картинок:
+            if xref in занятые:
+                continue
+            if y1 <= y_подписи + 5:  # +5 px допуск
+                расстояние = y_подписи - y1
+                if расстояние < лучшее_расстояние:
+                    лучшее_расстояние = расстояние
+                    лучший_xref = xref
+        if лучший_xref is not None:
+            результат[лучший_xref] = подпись["full"]
+            занятые.add(лучший_xref)
+        else:
+            непривязанные_подписи.append(подпись)
+
+    # Оставшиеся подписи раздаём оставшимся картинкам в порядке Y (top→bottom)
+    if непривязанные_подписи:
+        свободные = [(xref, b) for xref, b in bbox_картинок if xref not in занятые]
+        свободные.sort(key=lambda x: x[1][1])  # по y0
+        for подпись, (xref, _) in zip(непривязанные_подписи, свободные):
+            результат[xref] = подпись["full"]
+            занятые.add(xref)
+
+    return результат
 
 
 _VISION_CAPTION_PROMPT = (
@@ -644,13 +752,15 @@ def _извлечь_картинки_страницы(
     if fitz is None:
         return []
     результаты: list[dict[str, Any]] = []
-    видели_xref: set[int] = set()
-    счётчик = 0
     try:
         картинки = страница.get_images(full=True)
     except Exception:
         return []
-    подписи_страницы = _извлечь_подписи_со_страницы(текст_страницы)
+
+    # Сначала сохраняем все картинки на диск и собираем порядок xref'ов
+    сохранённые: list[tuple[int, Path, str]] = []  # (xref, файл, относительный_путь)
+    видели_xref: set[int] = set()
+    счётчик = 0
     for запись in картинки:
         xref = запись[0]
         if xref in видели_xref:
@@ -670,14 +780,17 @@ def _извлечь_картинки_страницы(
             относительный = файл.relative_to(BASE_DIR).as_posix()
         except ValueError:
             относительный = str(файл)
+        сохранённые.append((xref, файл, относительный))
 
-        # Привязка подписи: i-я картинка i-я подпись страницы
-        caption = ""
-        if 0 <= счётчик - 1 < len(подписи_страницы):
-            caption = подписи_страницы[счётчик - 1]
-        elif vision_api_key:
+    # Привязка подписей через геометрию страницы (bbox)
+    подписи_страницы = _извлечь_подписи_со_страницы(текст_страницы)
+    xrefs_порядок = [x for x, _, _ in сохранённые]
+    привязка = _привязать_подписи(страница, xrefs_порядок, подписи_страницы)
+
+    for xref, файл, относительный in сохранённые:
+        caption = привязка.get(xref, "")
+        if not caption and vision_api_key:
             caption = _vision_caption_картинки(файл, vision_api_key)
-
         результаты.append({
             "path": относительный,
             "page": номер,
