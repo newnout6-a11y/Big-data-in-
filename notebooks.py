@@ -359,9 +359,9 @@ def notebook_fragments(
             with_vectors=False,
         )
         for point in batch:
-            payload = dict(point.payload or {})
-            payload["score"] = float(payload.get("score", 0.0) or 0.0)
-            points.append(payload)
+            # scroll'ом достаём фрагменты целиком (для UI «все документы тетради»),
+            # никакого score из retrieval тут нет — это не поиск, а перечисление.
+            points.append(dict(point.payload or {}))
         if offset is None:
             break
     points.sort(key=lambda item: (
@@ -681,7 +681,15 @@ def _извлечь_встроенные_картинки_по_страница�
 
 
 def _file_hash(path: Path) -> str:
-    h = hashlib.sha1()
+    """SHA-256 от содержимого файла, поточно. Используется как подкаталог для
+    извлечённых картинок и для дедупа в payload (поле file_hash).
+
+    Раньше тут был SHA-1 — несогласованный с другими местами проекта,
+    которые считают SHA-256. Старые папки `extracted_images/<sha1>/` остаются
+    на диске и продолжают работать через сохранённые в payload пути; новые
+    загрузки идут уже под SHA-256.
+    """
+    h = hashlib.sha256()
     try:
         with path.open("rb") as f:
             for блок in iter(lambda: f.read(65536), b""):

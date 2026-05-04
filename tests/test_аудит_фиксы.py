@@ -185,3 +185,65 @@ def test_C3_пометить_скачанным_синхронизирует_set
     assert "arxiv:2304.12345" in с["_downloaded_set"]
     assert "arxiv:2304.12345" in с["_normalized_set"]
     assert state.уже_скачан(с, "arxiv:2304.12345")
+
+
+# ---------- H6: единый SHA-256 для file_hash ----------
+
+def test_H6_file_hash_использует_sha256(tmp_path):
+    """notebooks._file_hash должен возвращать SHA-256, как и остальные модули."""
+    import hashlib
+
+    from notebooks import _file_hash
+
+    данные = b"test PDF content"
+    путь = tmp_path / "test.pdf"
+    путь.write_bytes(данные)
+
+    результат = _file_hash(путь)
+    ожидание = hashlib.sha256(данные).hexdigest()
+
+    assert результат == ожидание
+    assert len(результат) == 64  # SHA-256 hex = 64 символа (SHA-1 был бы 40)
+
+
+# ---------- H7: notebook_fragments не выставляет фейковый score ----------
+
+def test_H7_notebook_fragments_не_добавляет_score():
+    """Фрагменты от scroll'а — это перечисление документов тетради, не поиск.
+    Раньше payload получал бессмысленный score=0.0 — теперь поле просто
+    отсутствует, чтобы UI не путался с retrieval-результатами."""
+    from types import SimpleNamespace
+
+    import notebooks
+
+    # Мок Qdrant client: возвращает один батч из двух точек, потом stop
+    class ФейкКлиент:
+        def __init__(self):
+            self.вызовов = 0
+
+        def get_collections(self):
+            return SimpleNamespace(collections=[SimpleNamespace(name="user_nb_test")])
+
+        def create_collection(self, *a, **kw):
+            pass
+
+        def create_payload_index(self, *a, **kw):
+            pass
+
+        def scroll(self, **kw):
+            self.вызовов += 1
+            if self.вызовов > 1:
+                return [], None
+            return [
+                SimpleNamespace(payload={"text": "первый", "page": 1, "document": "doc.pdf"}),
+                SimpleNamespace(payload={"text": "второй", "page": 2, "document": "doc.pdf"}),
+            ], None
+
+    тетрадь = {"id": "nb-test", "collection": "user_nb_test", "files": []}
+    клиент = ФейкКлиент()
+
+    результат = notebooks.notebook_fragments(клиент, тетрадь, user_id="u1")
+
+    assert len(результат) == 2
+    for фр in результат:
+        assert "score" not in фр, "scroll-результаты не должны содержать поля score"
