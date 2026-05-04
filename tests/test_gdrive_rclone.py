@@ -1,8 +1,6 @@
 """Тесты для harvester.gdrive_rclone (rclone-обёртка). Без реального rclone."""
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 

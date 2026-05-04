@@ -16,7 +16,7 @@ import os
 
 import numpy as np
 
-from taxonomy import все_субдомены, ДОМЕНЫ
+from taxonomy import все_субдомены
 
 
 _БАЗОВАЯ_ПАПКА = os.path.dirname(os.path.abspath(__file__))

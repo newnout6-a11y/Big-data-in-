@@ -4,7 +4,7 @@ import re
 import json
 import mimetypes
 import html
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
@@ -22,7 +22,6 @@ import notebooks
 import study_tools
 import визуальная_обработка as виз
 from cases import кейсы, получить_название_кейса
-from fallback_answers import заготовленные_ответы
 from taxonomy import ДОМЕНЫ, название_домена, название_субдомена
 from классификатор import (
     подготовить_прототипы,
@@ -311,7 +310,7 @@ def _recency_boost(год, λ=0.0667):
     """Множитель свежести: статья этого года → 1.0, на 5 лет старше → ~0.72."""
     if not год:
         return 1.0
-    разница = max(0, datetime.utcnow().year - int(год))
+    разница = max(0, datetime.now(timezone.utc).year - int(год))
     return math.exp(-λ * разница)
 
 
@@ -1582,7 +1581,7 @@ with вкладка1:
             with ф3:
                 выбор_года_от = st.number_input(
                     "Не раньше",
-                    min_value=1990, max_value=datetime.utcnow().year,
+                    min_value=1990, max_value=datetime.now(timezone.utc).year,
                     value=2018, step=1,
                 )
             with ф4:

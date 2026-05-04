@@ -18,7 +18,6 @@ OAI отдаёт Dublin Core метаданные (без полного тек�
 from __future__ import annotations
 
 import time
-from typing import Iterator
 from xml.etree import ElementTree as ET
 
 import httpx

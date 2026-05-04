@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock, patch
 
 from harvester.sources import europepmc, cyberleninka, stackexchange

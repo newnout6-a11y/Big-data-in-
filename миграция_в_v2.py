@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -99,7 +99,7 @@ def main():
     модель = SentenceTransformer("intfloat/multilingual-e5-base")
     метки, прототипы, _ = подготовить_прототипы(модель)
 
-    дата_сегодня = datetime.utcnow().strftime("%Y-%m-%d")
+    дата_сегодня = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     смещение = в_новой
     скроллер = None
     обработано = 0
