@@ -190,7 +190,10 @@ def ingest_uploaded_files(
                 # Параллельно достаём встроенные диаграммы/картинки. Иначе при
                 # включённом visual_mode поиск отдаёт только текст: рендер целой
                 # страницы из `визуальная_обработка` нигде в выдаче не выводится.
-                images_by_page = _извлечь_встроенные_картинки_по_страницам(target)
+                images_by_page = _извлечь_встроенные_картинки_по_страницам(
+                    target,
+                    vision_api_key=groq_key if use_groq_vision else "",
+                )
                 pages = [
                     {
                         "page": p["page"],
@@ -565,16 +568,78 @@ def downloadable_name(fragment: Any) -> str:
     return sanitize_filename(payload.get("document") or "document")
 
 
+_CAPTION_REGEX = re.compile(
+    r"(?im)(?:^|\n|\.)\s*"
+    r"(?P<tag>Fig(?:ure|\.)?|Рис(?:унок|\.)?|Scheme|Схема|Схемы|Table|Таблица)"
+    r"\s*(?P<num>\d+)[\.:\)\s-]+"
+    r"(?P<body>[^\n]{10,400})"
+)
+
+
+def _извлечь_подписи_со_страницы(текст: str) -> list[str]:
+    """Возвращает список подписей вида 'Fig. N …' / 'Рис. N …' в порядке
+    появления в тексте страницы. Используется для привязки подписей к
+    встроенным картинкам (по порядку)."""
+    if not текст:
+        return []
+    подписи: list[str] = []
+    for m in _CAPTION_REGEX.finditer(текст):
+        tag = m.group("tag").strip().rstrip(".")
+        num = m.group("num")
+        body = m.group("body").strip()
+        # обрезаем до первой точки, если тело длинное
+        if len(body) > 220:
+            точка = body.find(". ")
+            if 40 < точка < 220:
+                body = body[: точка + 1]
+        подписи.append(f"{tag} {num}. {body}")
+    return подписи
+
+
+_VISION_CAPTION_PROMPT = (
+    "Опиши кратко (1–2 предложения) что изображено на этой картинке из научной "
+    "статьи. Для схем/диаграмм — тип и ключевые элементы. Для графиков — оси и "
+    "смысл. Для формул — запиши саму формулу. Отвечай на русском, без "
+    "вступлений."
+)
+
+
+def _vision_caption_картинки(путь_файла: Path, api_key: str) -> str:
+    """Возвращает краткое описание картинки через Groq Vision. Пустая строка,
+    если не получилось."""
+    if not api_key:
+        return ""
+    try:
+        данные = путь_файла.read_bytes()
+    except OSError:
+        return ""
+    try:
+        caption, _, _ = виз._call_groq_vision(
+            данные, api_key, prompt=_VISION_CAPTION_PROMPT
+        )
+        return (caption or "").strip()
+    except Exception:
+        return ""
+
+
 def _извлечь_картинки_страницы(
     документ: Any,
     страница: Any,
     номер: int,
     папка: Path,
+    *,
+    текст_страницы: str = "",
+    vision_api_key: str = "",
 ) -> list[dict[str, Any]]:
-    """Сохраняет встроенные картинки PDF-страницы и возвращает список путей.
+    """Сохраняет встроенные картинки PDF-страницы и возвращает список с
+    описаниями.
 
-    Формат — как в ingest_v2: `[{"path": "extracted_images/<hash>/page_X_img_Y.png",
-    "page": <int>}]`. Тот же формат ожидает `показать_картинки_фрагмента` в app.py.
+    Формат элементов: `{"path", "page", "kind", "caption"}`. Поле `caption`
+    заполняется по двум источникам (по убыванию приоритета):
+      1) подписи вида `Fig. N …` / `Рис. N …`, найденные в тексте страницы —
+         присваиваются картинкам по порядку их появления;
+      2) Groq Vision (если передан `vision_api_key`) — для оставшихся
+         картинок без подписи.
     """
     if fitz is None:
         return []
@@ -585,6 +650,7 @@ def _извлечь_картинки_страницы(
         картинки = страница.get_images(full=True)
     except Exception:
         return []
+    подписи_страницы = _извлечь_подписи_со_страницы(текст_страницы)
     for запись in картинки:
         xref = запись[0]
         if xref in видели_xref:
@@ -604,21 +670,31 @@ def _извлечь_картинки_страницы(
             относительный = файл.relative_to(BASE_DIR).as_posix()
         except ValueError:
             относительный = str(файл)
+
+        # Привязка подписи: i-я картинка i-я подпись страницы
+        caption = ""
+        if 0 <= счётчик - 1 < len(подписи_страницы):
+            caption = подписи_страницы[счётчик - 1]
+        elif vision_api_key:
+            caption = _vision_caption_картинки(файл, vision_api_key)
+
         результаты.append({
             "path": относительный,
             "page": номер,
             "kind": "extracted_image",
+            "caption": caption,
         })
     return результаты
 
 
-def _extract_pdf(path: Path) -> list[dict[str, Any]]:
+def _extract_pdf(path: Path, *, vision_api_key: str = "") -> list[dict[str, Any]]:
     """Возвращает список страниц `{page, text, images}`.
 
     `images` — это список встроенных в PDF картинок, сохранённых на диск под
     `extracted_images/<file_hash>/`. Извлекаются всегда, даже без флага
     `visual_mode` — это отдельная (бесплатная) фича: «показать рисунки рядом
-    с найденным фрагментом».
+    с найденным фрагментом». Если задан `vision_api_key`, для картинок без
+    подписи в тексте вызывается Groq Vision.
     """
     pages: list[dict[str, Any]] = []
     file_hash = _file_hash(path)
@@ -629,7 +705,11 @@ def _extract_pdf(path: Path) -> list[dict[str, Any]]:
             try:
                 for index, page in enumerate(doc, start=1):
                     text = page.get_text("text") or ""
-                    images = _извлечь_картинки_страницы(doc, page, index, images_dir)
+                    images = _извлечь_картинки_страницы(
+                        doc, page, index, images_dir,
+                        текст_страницы=text,
+                        vision_api_key=vision_api_key,
+                    )
                     if len(text.strip()) > 40 or images:
                         pages.append({"page": index, "text": text, "images": images})
             finally:
@@ -653,7 +733,11 @@ def _extract_pdf(path: Path) -> list[dict[str, Any]]:
     return pages
 
 
-def _извлечь_встроенные_картинки_по_страницам(path: Path) -> dict[int, list[dict[str, Any]]]:
+def _извлечь_встроенные_картинки_по_страницам(
+    path: Path,
+    *,
+    vision_api_key: str = "",
+) -> dict[int, list[dict[str, Any]]]:
     """Сохраняет встроенные в PDF картинки и возвращает индекс `page -> [images]`.
 
     Используется в `ingest_uploaded_files`, когда `visual_mode=True`: визуальная
@@ -672,7 +756,16 @@ def _извлечь_встроенные_картинки_по_страница�
         return {}
     try:
         for index, page in enumerate(doc, start=1):
-            картинки = _извлечь_картинки_страницы(doc, page, index, images_dir)
+            текст = ""
+            try:
+                текст = page.get_text("text") or ""
+            except Exception:
+                текст = ""
+            картинки = _извлечь_картинки_страницы(
+                doc, page, index, images_dir,
+                текст_страницы=текст,
+                vision_api_key=vision_api_key,
+            )
             if картинки:
                 индекс[index] = картинки
     finally:
