@@ -106,12 +106,12 @@ def нормализовать_doc_id(doc_id: str) -> str:
 
 def прочитать():
     if not os.path.exists(ФАЙЛ_СОСТОЯНИЯ):
-        return _значения_по_умолчанию()
+        return _добавить_индексы(_значения_по_умолчанию())
     try:
         with open(ФАЙЛ_СОСТОЯНИЯ, "r", encoding="utf-8") as f:
             данные = json.load(f)
     except Exception:
-        return _значения_по_умолчанию()
+        return _добавить_индексы(_значения_по_умолчанию())
 
     # Миграция со схемы v2 → v3: бэкфилл normalized_ids из downloaded_ids.
     if "normalized_ids" not in данные:
@@ -126,17 +126,43 @@ def прочитать():
     if "domain_counts" not in данные:
         данные["domain_counts"] = {"chem": 0, "it": 0, "other": 0}
         данные["version"] = 4
+    return _добавить_индексы(данные)
+
+
+def _добавить_индексы(данные: dict) -> dict:
+    """Кладёт в state множества для O(1) lookup'а уже скачанных id.
+
+    Поля начинаются с подчёркивания и удаляются перед сохранением, чтобы
+    не попасть в JSON. Без них `уже_скачан`/`пометить_скачанным` строили
+    бы set(...) из списка на каждый вызов — O(n²) на полный harvest.
+    """
+    данные["_downloaded_set"] = set(данные.get("downloaded_ids") or ())
+    данные["_normalized_set"] = set(данные.get("normalized_ids") or ())
     return данные
 
 
 def сохранить(данные):
-    os.makedirs(os.path.dirname(ФАЙЛ_СОСТОЯНИЯ), exist_ok=True) if os.path.dirname(ФАЙЛ_СОСТОЯНИЯ) else None
+    parent = os.path.dirname(ФАЙЛ_СОСТОЯНИЯ)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    # Внутренние индексы (set'ы) не сериализуем — они восстанавливаются на read.
+    для_записи = {k: v for k, v in данные.items() if not k.startswith("_")}
     with _замок:
         # Атомарная запись
         врем = ФАЙЛ_СОСТОЯНИЯ + ".tmp"
         with open(врем, "w", encoding="utf-8") as f:
-            json.dump(данные, f, ensure_ascii=False, indent=2)
+            json.dump(для_записи, f, ensure_ascii=False, indent=2)
         os.replace(врем, ФАЙЛ_СОСТОЯНИЯ)
+
+
+def _получить_сет(состояние: dict, ключ_сета: str, ключ_списка: str) -> set:
+    """Достаёт set из state, лениво подкачивая его из списка для старого state."""
+    сет = состояние.get(ключ_сета)
+    if isinstance(сет, set):
+        return сет
+    сет = set(состояние.get(ключ_списка) or ())
+    состояние[ключ_сета] = сет
+    return сет
 
 
 def уже_скачан(состояние, doc_id):
@@ -145,12 +171,14 @@ def уже_скачан(состояние, doc_id):
     Это даёт кросс-источниковый дедуп: arxiv:2304.12345 и openalex:10.48550/arxiv.2304.12345
     оба дадут normalized = arxiv:2304.12345, второй раз не скачается.
     """
-    if doc_id in set(состояние.get("downloaded_ids", [])):
+    downloaded = _получить_сет(состояние, "_downloaded_set", "downloaded_ids")
+    if doc_id in downloaded:
         return True
     норм = нормализовать_doc_id(doc_id)
-    if норм and норм in set(состояние.get("normalized_ids", [])):
-        return True
-    return False
+    if not норм:
+        return False
+    normalized = _получить_сет(состояние, "_normalized_set", "normalized_ids")
+    return норм in normalized
 
 
 def пометить_скачанным(состояние, doc_id):
@@ -158,11 +186,15 @@ def пометить_скачанным(состояние, doc_id):
         состояние["downloaded_ids"] = []
     if "normalized_ids" not in состояние:
         состояние["normalized_ids"] = []
-    if doc_id not in состояние["downloaded_ids"]:
+    downloaded = _получить_сет(состояние, "_downloaded_set", "downloaded_ids")
+    normalized = _получить_сет(состояние, "_normalized_set", "normalized_ids")
+    if doc_id not in downloaded:
         состояние["downloaded_ids"].append(doc_id)
+        downloaded.add(doc_id)
     норм = нормализовать_doc_id(doc_id)
-    if норм and норм not in состояние["normalized_ids"]:
+    if норм and норм not in normalized:
         состояние["normalized_ids"].append(норм)
+        normalized.add(норм)
 
 
 def залогировать(сообщение):

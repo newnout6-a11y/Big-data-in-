@@ -1,7 +1,6 @@
 """Тесты для semantic_scholar, core_api, unpaywall и их интеграции в run.py."""
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from harvester.sources import semantic_scholar, core_api, unpaywall
 from harvester import run

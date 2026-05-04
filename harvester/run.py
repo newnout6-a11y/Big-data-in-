@@ -259,14 +259,6 @@ def _ua(args):
     return f"corpus-harvester/1.1 ({args.email or 'unknown'})"
 
 
-def _распределить_бюджет(всего, источники):
-    """Поровну, но не меньше 1 на источник."""
-    if not источники:
-        return {}
-    доля = max(1, всего // len(источники))
-    return {и: доля for и in источники}
-
-
 def _собрать_arxiv(args, состояние, клиент_pdf, бюджет):
     print(f"[arxiv] бюджет {бюджет}, начало {состояние['sources']['arxiv']['last_index']}")
     с = состояние["sources"]["arxiv"]["last_index"]
@@ -486,7 +478,6 @@ def запустить(args):
     коэф_домен = домены.рассчитать_коэффициенты(counts)
     print(f"[balance] счётчики {counts} → коэф {коэф_домен}")
 
-    базовый = max(1, args.budget // len(источники))
     весы: list[float] = []
     for и in источники:
         ожидаемый = домены.ИСТОЧНИК_ОЖИДАЕМЫЙ_ДОМЕН.get(и, "other")
@@ -516,7 +507,7 @@ def запустить(args):
     клиент_pdf.close()
     print(f"\nИтого скачано: {итог}")
     print(f"Папка: {ПАПКА_PDF}")
-    print(f"Дальше: python ingest_v2.py && python embed_resume_v2.py")
+    print("Дальше: python ingest_v2.py && python embed_resume_v2.py")
     return 0
 
 

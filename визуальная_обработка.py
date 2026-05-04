@@ -20,7 +20,7 @@ import hashlib
 import json
 import os
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -409,8 +409,10 @@ def обработать_pdf(
                 parts.append(f"[Описание изображения]\n{result.visual_caption.strip()}")
 
             combined_text = "\n\n".join(parts)
-            if len(combined_text.strip()) < 40:
-                continue
+            # Не выкидываем страницы с пустым/коротким текстом: фильтрация по
+            # длине + наличию картинок делается в notebooks.build_chunks. Раньше
+            # `if combined_text < 40: continue` дропал страницы с одной только
+            # диаграммой и без OCR — встроенные картинки оставались сиротами.
 
             pages_out.append({
                 "page": idx,
