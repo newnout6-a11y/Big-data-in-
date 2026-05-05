@@ -1,0 +1,91 @@
+name: verify-qdrant
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Smoke-test Qdrant Cloud
+        env:
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os, json, uuid
+          from qdrant_client import QdrantClient
+          from qdrant_client.models import (
+              BinaryQuantization, BinaryQuantizationConfig,
+              Distance, Modifier, PointStruct, SparseIndexParams,
+              SparseVector, SparseVectorParams, VectorParams,
+          )
+
+          url = os.environ['QDRANT_URL']
+          key = os.environ['QDRANT_API_KEY']
+          assert url and key, 'QDRANT_URL/API_KEY missing'
+          print(f'Connecting to: {url}')
+
+          c = QdrantClient(url=url, api_key=key, prefer_grpc=False, timeout=60)
+          info = c.get_collections()
+          print(f'Existing collections: {[k.name for k in info.collections]}')
+
+          col = 'knowledge_hybrid'
+          existing = {k.name for k in info.collections}
+          if col not in existing:
+              print(f'Creating {col} with binary quantization...')
+              c.create_collection(
+                  collection_name=col,
+                  vectors_config={'dense': VectorParams(size=768, distance=Distance.COSINE, on_disk=True)},
+                  sparse_vectors_config={'sparse': SparseVectorParams(index=SparseIndexParams(on_disk=False), modifier=Modifier.IDF)},
+                  quantization_config=BinaryQuantization(binary=BinaryQuantizationConfig(always_ram=True)),
+              )
+              print('Created')
+          else:
+              print(f'{col} уже существует — beforechecking config')
+
+          conf = c.get_collection(col)
+          print(f'Vectors count: {conf.points_count}')
+          print(f'Quantization config: {conf.config.quantization_config}')
+          print(f'Vectors config: {conf.config.params.vectors}')
+
+          # Smoke upsert: 3 dummy points
+          import random
+          random.seed(42)
+          points = []
+          for i in range(3):
+              pid = str(uuid.uuid5(uuid.NAMESPACE_URL, f'qdrant-smoke-{i}'))
+              dense = [random.gauss(0, 0.1) for _ in range(768)]
+              points.append(PointStruct(
+                  id=pid,
+                  vector={
+                      'dense': dense,
+                      'sparse': SparseVector(indices=[1, 2, 3], values=[0.5, 0.3, 0.2]),
+                  },
+                  payload={'smoke': True, 'idx': i, 'text': f'тестовый чанк {i}'},
+              ))
+
+          c.upsert(col, points=points, wait=True)
+          print(f'Upserted {len(points)} smoke points')
+          conf2 = c.get_collection(col)
+          print(f'Now points_count = {conf2.points_count}')
+
+          # Search smoke
+          from qdrant_client.models import NamedVector
+          q = c.query_points(
+              collection_name=col,
+              query=points[0].vector['dense'],
+              using='dense',
+              limit=2,
+          )
+          print(f'Query returned: {[(p.id, p.score) for p in q.points]}')
+          PY
