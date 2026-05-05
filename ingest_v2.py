@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 import docx
@@ -276,9 +277,13 @@ def main(argv=None):
     отбракованных = 0
     хэши_в_сессии: set[str] = set()
     с_дедупом = 0
+    время_старта = time.time()
 
     with open(ФАЙЛ_ЧАНКОВ, режим, encoding="utf-8") as выход:
         for индекс, имя in enumerate(новые, start=1):
+            t_файл = time.time()
+            размер_МБ = os.path.getsize(os.path.join(ПАПКА_PDF, имя)) / (1024 * 1024)
+            print(f"[{индекс}/{len(новые)}] {имя} ({размер_МБ:.1f} MB) ...", flush=True)
             путь = os.path.join(ПАПКА_PDF, имя)
             нижний = имя.lower()
             картинки_по_страницам = {}
@@ -368,8 +373,14 @@ def main(argv=None):
                 счётчик_чанков += 1
             выход.flush()
 
-            if индекс % 25 == 0 or индекс == len(новые):
-                print(f"  [{индекс}/{len(новые)}] чанков добавлено всего: {счётчик_чанков}")
+            длит = time.time() - t_файл
+            прошло = time.time() - время_старта
+            сред = прошло / индекс
+            осталось = (len(новые) - индекс) * сред
+            print(
+                f"  → {длит:.1f}s, chunks={счётчик_чанков}, прошло {прошло/60:.1f}m, ETA ≈ {осталось/60:.1f}m",
+                flush=True,
+            )
 
     print(f"\nГотово. Чанков добавлено: {счётчик_чанков}, дедупликаций: {с_дедупом}")
     if отбракованных:
