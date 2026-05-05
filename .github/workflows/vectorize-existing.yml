@@ -116,8 +116,9 @@ jobs:
       - name: Ingest PDFs → chunks_v2.jsonl
         env:
           HARVESTER_EMAIL: ${{ secrets.HARVESTER_EMAIL }}
+          PYTHONUNBUFFERED: "1"
         run: |
-          python ingest_v2.py
+          python -u ingest_v2.py
           echo "=== chunks_v2.jsonl stats ==="
           wc -l chunks_v2.jsonl || echo "chunks_v2.jsonl missing"
           du -h chunks_v2.jsonl || true
@@ -126,8 +127,9 @@ jobs:
         env:
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          PYTHONUNBUFFERED: "1"
         run: |
-          python embed_resume_v2.py
+          python -u embed_resume_v2.py
 
       - name: Push state.json back to Drive
         env:
