@@ -749,6 +749,51 @@ _VISION_CAPTION_PROMPT = (
 )
 
 
+def _найти_фоновые_xref(документ: Any, *, мин_страниц: int = 3) -> set[int]:
+    """Определяет xref'ы картинок, которые повторяются на ≥ `мин_страниц`
+    страницах документа. Это почти наверняка элементы шаблона презентации
+    (фоновые полоски, водяные знаки, логотипы кафедры), а не контент.
+
+    Для коротких документов (<6 страниц) возвращает пустое множество —
+    в научных статьях логотип на первой странице не считаем «фоном».
+    """
+    if fitz is None:
+        return set()
+    try:
+        всего_страниц = len(документ)
+    except Exception:
+        return set()
+    if всего_страниц < 6:
+        return set()
+    счётчик: dict[int, int] = {}
+    for страница in документ:
+        try:
+            xrefs_страницы = {з[0] for з in страница.get_images(full=True)}
+        except Exception:
+            continue
+        for xref in xrefs_страницы:
+            счётчик[xref] = счётчик.get(xref, 0) + 1
+    return {xref for xref, n in счётчик.items() if n >= мин_страниц}
+
+
+def _картинка_декоративная(pix: Any) -> bool:
+    """True, если картинка похожа на декоративную полоску/иконку шаблона:
+    очень узкая, очень низкая или с экстремальным соотношением сторон.
+    """
+    try:
+        ширина = int(pix.width)
+        высота = int(pix.height)
+    except Exception:
+        return False
+    if ширина < 80 or высота < 80:
+        return True
+    # Узкая горизонтальная или вертикальная полоска
+    стороны = sorted((ширина, высота))
+    if стороны[0] < 120 and стороны[1] / max(стороны[0], 1) > 5:
+        return True
+    return False
+
+
 def _vision_caption_картинки(путь_файла: Path, api_key: str) -> str:
     """Возвращает краткое описание картинки через Groq Vision. Пустая строка,
     если не получилось."""
@@ -775,6 +820,7 @@ def _извлечь_картинки_страницы(
     *,
     текст_страницы: str = "",
     vision_api_key: str = "",
+    фоновые_xref: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Сохраняет встроенные картинки PDF-страницы и возвращает список с
     описаниями.
@@ -785,6 +831,10 @@ def _извлечь_картинки_страницы(
          присваиваются картинкам по порядку их появления;
       2) Groq Vision (если передан `vision_api_key`) — для оставшихся
          картинок без подписи.
+
+    Картинки, чей xref входит в `фоновые_xref` (повторяющиеся на многих
+    страницах элементы шаблона презентации) пропускаются. Также
+    отфильтровываются декоративные полоски (узкие/маленькие).
     """
     if fitz is None:
         return []
@@ -803,10 +853,14 @@ def _извлечь_картинки_страницы(
         if xref in видели_xref:
             continue
         видели_xref.add(xref)
+        if фоновые_xref and xref in фоновые_xref:
+            continue
         try:
             pix = fitz.Pixmap(документ, xref)
             if pix.n >= 5:
                 pix = fitz.Pixmap(fitz.csRGB, pix)
+            if _картинка_декоративная(pix):
+                continue
             счётчик += 1
             папка.mkdir(parents=True, exist_ok=True)
             файл = папка / f"page_{номер}_img_{счётчик}.png"
@@ -864,12 +918,14 @@ def _extract_pdf(path: Path, *, vision_api_key: str = "") -> list[dict[str, Any]
         try:
             doc = fitz.open(path)
             try:
+                фоновые = _найти_фоновые_xref(doc)
                 for index, page in enumerate(doc, start=1):
                     text = page.get_text("text") or ""
                     images = _извлечь_картинки_страницы(
                         doc, page, index, images_dir,
                         текст_страницы=text,
                         vision_api_key=vision_api_key,
+                        фоновые_xref=фоновые,
                     )
                     if len(text.strip()) > 40 or images:
                         pages.append({"page": index, "text": text, "images": images})
@@ -916,6 +972,7 @@ def _извлечь_встроенные_картинки_по_страница�
     except Exception:
         return {}
     try:
+        фоновые = _найти_фоновые_xref(doc)
         for index, page in enumerate(doc, start=1):
             текст = ""
             try:
@@ -926,6 +983,7 @@ def _извлечь_встроенные_картинки_по_страница�
                 doc, page, index, images_dir,
                 текст_страницы=текст,
                 vision_api_key=vision_api_key,
+                фоновые_xref=фоновые,
             )
             if картинки:
                 индекс[index] = картинки
