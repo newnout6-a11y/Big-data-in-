@@ -844,11 +844,20 @@ def показать_ответ_с_картинками(ответ, фрагме
 
 
 def показать_экспорт_ответа(заголовок, текст, фрагменты, key_prefix):
+    # Резолвер [img:N.M] → (путь, подпись, caption) — тот же, что использует
+    # показать_ответ_с_картинками в UI. Передаём его и в .md-, и в .docx-экспорт,
+    # чтобы картинки реально встраивались в скачанный файл, а сырые маркеры
+    # не оставались в тексте.
+    resolver = lambda n, m: _разрешить_img_маркер(n, m, фрагменты)  # noqa: E731
     к1, к2 = st.columns(2, gap="small")
     with к1:
         st.download_button(
             "Скачать ответ .md",
-            data=study_tools.markdown_export(заголовок, текст, фрагменты),
+            data=study_tools.markdown_export(
+                заголовок, текст, фрагменты,
+                image_resolver=resolver,
+                embed_base64=True,
+            ),
             file_name="navigator_answer.md",
             mime="text/markdown",
             key=f"{key_prefix}_md",
@@ -857,7 +866,10 @@ def показать_экспорт_ответа(заголовок, текст,
     with к2:
         st.download_button(
             "Скачать ответ .docx",
-            data=study_tools.docx_export(заголовок, текст, фрагменты),
+            data=study_tools.docx_export(
+                заголовок, текст, фрагменты,
+                image_resolver=resolver,
+            ),
             file_name="navigator_answer.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             key=f"{key_prefix}_docx",

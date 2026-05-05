@@ -1,18 +1,32 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
+import mimetypes
 import re
 import tempfile
 import csv
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import docx
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import parse_xml
+from docx.shared import Inches, Pt
+
+
+# Маркер картинки в ответе LLM: [img:N.M] — номер фрагмента и номер картинки
+# внутри него. Тот же формат используется в app.py:_IMG_МАРКЕР.
+_IMG_МАРКЕР = re.compile(r"\[img:(\d+)\.(\d+)\]")
+
+
+# Тип функции-резолвера: по (N, M) вернуть (путь, подпись, caption) или None.
+# Сигнатура совпадает с app._разрешить_img_маркер, но здесь она опциональна,
+# чтобы study_tools оставался не-привязанным к app.
+ImageResolver = Callable[[int, int], "tuple[Path, str, str] | None"]
 
 
 def fragments_context(fragments: list[dict[str, Any]], *, max_chars: int = 12000) -> str:
@@ -49,8 +63,46 @@ def parse_json_loose(raw: str) -> dict[str, Any]:
     raise ValueError("LLM вернула невалидный JSON.")
 
 
-def markdown_export(title: str, body: str, fragments: list[dict[str, Any]] | None = None) -> bytes:
-    lines = [f"# {title.strip() or 'Экспорт'}", "", body.strip(), ""]
+def _картинка_data_uri(путь: Path) -> str | None:
+    """Читает картинку и возвращает data: URI, пригодный для встраивания
+    в Markdown. Возвращает None если файл не читается."""
+    try:
+        data = путь.read_bytes()
+    except (OSError, ValueError):
+        return None
+    mime, _ = mimetypes.guess_type(str(путь))
+    if not mime:
+        mime = "image/png"
+    b64 = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def markdown_export(
+    title: str,
+    body: str,
+    fragments: list[dict[str, Any]] | None = None,
+    *,
+    image_resolver: ImageResolver | None = None,
+    embed_base64: bool = True,
+) -> bytes:
+    """Собирает .md из тела ответа. Маркеры [img:N.M] заменяет на
+    Markdown-картинки: если `embed_base64=True` — base64-data-URI (файл
+    самодостаточен и не требует папки с картинками рядом), иначе —
+    относительный путь относительно текущей папки.
+
+    LaTeX-блоки $$...$$ и $...$ оставляем как есть — современные
+    Markdown-рендеры (Obsidian, Typora, GitHub с MathJax) их понимают.
+    Артефакты вроде голых `\\text{...}` вне $-блоков чистим: не каждый
+    рендер умеет, и без $ они смотрятся как мусор.
+    """
+    body = _очистить_latex_вне_формул(body.strip())
+    body = _заменить_img_маркеры_на_markdown(
+        body,
+        image_resolver=image_resolver,
+        embed_base64=embed_base64,
+    )
+
+    lines = [f"# {title.strip() or 'Экспорт'}", "", body, ""]
     if fragments:
         lines.extend(["## Источники", ""])
         for index, fragment in enumerate(fragments, 1):
@@ -60,10 +112,63 @@ def markdown_export(title: str, body: str, fragments: list[dict[str, Any]] | Non
     return ("\n".join(lines).strip() + "\n").encode("utf-8")
 
 
-def docx_export(title: str, body: str, fragments: list[dict[str, Any]] | None = None) -> bytes:
+def docx_export(
+    title: str,
+    body: str,
+    fragments: list[dict[str, Any]] | None = None,
+    *,
+    image_resolver: ImageResolver | None = None,
+) -> bytes:
+    """Собирает .docx из тела ответа. Маркеры [img:N.M] резолвятся через
+    `image_resolver` и встраиваются как реальные картинки с подписью.
+    Без резолвера — маркер просто удаляется (в документе не остаётся
+    сырого `[img:1.2]`).
+
+    LaTeX: блоки $$...$$ и inline $...$ рендерятся в OMML, включая
+    `\\text{}`/`\\mathrm{}` (Word показывает обычным шрифтом внутри
+    формулы). Голый `\\text{...}` вне $-блоков нормализуется до просто
+    его содержимого — иначе в документе остаются артефакты.
+    """
     document = docx.Document()
     document.add_heading(title.strip() or "Экспорт", level=1)
-    for part in re.split(r"(\$\$.*?\$\$)", body.strip(), flags=re.DOTALL):
+
+    body = body.strip()
+
+    # Режем тело по маркерам картинок. Между маркерами — обычный текст,
+    # который передаём в старый парсер ($$ / $ / заголовки / параграфы).
+    последняя_позиция = 0
+    for m in _IMG_МАРКЕР.finditer(body):
+        кусок = body[последняя_позиция:m.start()]
+        if кусок.strip():
+            _docx_добавить_текстовый_блок(document, кусок)
+        последняя_позиция = m.end()
+        if image_resolver is not None:
+            _docx_добавить_картинку(document, int(m.group(1)), int(m.group(2)), image_resolver)
+        # Если резолвера нет или картинка не нашлась — просто пропускаем маркер.
+
+    хвост = body[последняя_позиция:]
+    if хвост.strip():
+        _docx_добавить_текстовый_блок(document, хвост)
+
+    if fragments:
+        document.add_heading("Источники", level=2)
+        for index, fragment in enumerate(fragments, 1):
+            document.add_paragraph(
+                f"[{index}] {fragment.get('document', '')}, стр. {fragment.get('page', '')}"
+            )
+
+    out = io.BytesIO()
+    document.save(out)
+    return out.getvalue()
+
+
+def _docx_добавить_текстовый_блок(document: Any, часть: str) -> None:
+    """Парсит произвольный кусок текста (без маркеров картинок) и добавляет
+    в document соответствующие paragraph'ы/формулы."""
+    часть = _очистить_latex_вне_формул(часть.strip())
+    if not часть:
+        return
+    for part in re.split(r"(\$\$.*?\$\$)", часть, flags=re.DOTALL):
         part = part.strip()
         if not part:
             continue
@@ -84,16 +189,111 @@ def docx_export(title: str, body: str, fragments: list[dict[str, Any]] | None = 
                 paragraph = document.add_paragraph()
                 _append_inline_math(paragraph, block)
 
-    if fragments:
-        document.add_heading("Источники", level=2)
-        for index, fragment in enumerate(fragments, 1):
-            document.add_paragraph(
-                f"[{index}] {fragment.get('document', '')}, стр. {fragment.get('page', '')}"
-            )
 
-    out = io.BytesIO()
-    document.save(out)
-    return out.getvalue()
+def _docx_добавить_картинку(
+    document: Any,
+    n: int,
+    m: int,
+    image_resolver: ImageResolver,
+) -> None:
+    try:
+        разрешено = image_resolver(n, m)
+    except Exception:
+        разрешено = None
+    if разрешено is None:
+        return
+    путь, подпись, _caption = разрешено
+    try:
+        document.add_picture(str(путь), width=Inches(5.5))
+    except Exception:
+        # Битый/неподдерживаемый файл — не валим весь экспорт, просто
+        # добавим подпись-плейсхолдер.
+        p = document.add_paragraph()
+        run = p.add_run(f"[картинка недоступна] {подпись}")
+        run.italic = True
+        return
+    # Картинка добавлена — последним параграф выравниваем по центру,
+    # следом — подпись.
+    try:
+        document.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    except Exception:
+        pass
+    подпись_p = document.add_paragraph()
+    подпись_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = подпись_p.add_run(подпись)
+    run.italic = True
+    run.font.size = Pt(9)
+
+
+_TEXT_КОМАНДА = re.compile(r"\\(?:text|mathrm|textbf|textit)\s*\{([^{}]*)\}")
+
+
+def _очистить_latex_вне_формул(текст: str) -> str:
+    """Убирает голые LaTeX-команды `\\text{...}` / `\\mathrm{...}` вне
+    $-блоков: заменяет на их содержимое. Внутри $...$ и $$...$$ не трогаем —
+    там их корректно рендерит OMML-парсер."""
+    if not текст:
+        return текст
+
+    куски: list[str] = []
+    i = 0
+    while i < len(текст):
+        # Ищем ближайший $-блок
+        dollar = текст.find("$", i)
+        if dollar == -1:
+            куски.append(_TEXT_КОМАНДА.sub(lambda m: m.group(1), текст[i:]))
+            break
+        # Текст до блока — чистим
+        куски.append(_TEXT_КОМАНДА.sub(lambda m: m.group(1), текст[i:dollar]))
+        # Определяем, $$ это или $
+        if текст.startswith("$$", dollar):
+            end = текст.find("$$", dollar + 2)
+            if end == -1:
+                куски.append(текст[dollar:])
+                break
+            куски.append(текст[dollar:end + 2])
+            i = end + 2
+        else:
+            end = текст.find("$", dollar + 1)
+            if end == -1:
+                куски.append(текст[dollar:])
+                break
+            куски.append(текст[dollar:end + 1])
+            i = end + 1
+    return "".join(куски)
+
+
+def _заменить_img_маркеры_на_markdown(
+    текст: str,
+    *,
+    image_resolver: ImageResolver | None,
+    embed_base64: bool,
+) -> str:
+    def _замена(m: re.Match) -> str:
+        if image_resolver is None:
+            return ""
+        try:
+            разрешено = image_resolver(int(m.group(1)), int(m.group(2)))
+        except Exception:
+            разрешено = None
+        if разрешено is None:
+            return ""
+        путь, подпись, _caption = разрешено
+        alt = подпись.replace("[", "(").replace("]", ")")
+        if embed_base64:
+            data_uri = _картинка_data_uri(путь)
+            if data_uri is None:
+                return ""
+            return f"\n\n![{alt}]({data_uri})\n\n*{alt}*\n\n"
+        # Относительный путь относительно CWD — для случая, когда .md
+        # распаковывается рядом с папкой extracted_images/.
+        try:
+            rel = путь.resolve().as_posix()
+        except Exception:
+            rel = str(путь)
+        return f"\n\n![{alt}]({rel})\n\n*{alt}*\n\n"
+
+    return _IMG_МАРКЕР.sub(_замена, текст)
 
 
 def _append_inline_math(paragraph: Any, text: str) -> None:
@@ -132,41 +332,60 @@ def _math_fragments(expr: str) -> str:
             )
             continue
 
-        token, i = _read_token(expr, i)
-        if not token:
-            break
-        sub = sup = None
-        while i < len(expr) and expr[i] in "_^":
-            marker = expr[i]
-            value, i = _read_script(expr, i + 1)
-            if marker == "_":
-                sub = value
-            else:
-                sup = value
-        if sub is not None and sup is not None:
-            out.append(
-                "<m:sSubSup>"
-                f"<m:e>{_math_text(token)}</m:e>"
-                f"<m:sub>{_math_fragments(sub)}</m:sub>"
-                f"<m:sup>{_math_fragments(sup)}</m:sup>"
-                "</m:sSubSup>"
-            )
-        elif sub is not None:
-            out.append(
-                "<m:sSub>"
-                f"<m:e>{_math_text(token)}</m:e>"
-                f"<m:sub>{_math_fragments(sub)}</m:sub>"
-                "</m:sSub>"
-            )
-        elif sup is not None:
-            out.append(
-                "<m:sSup>"
-                f"<m:e>{_math_text(token)}</m:e>"
-                f"<m:sup>{_math_fragments(sup)}</m:sup>"
-                "</m:sSup>"
-            )
+        # \text{...} / \mathrm{...} / \textbf{...} / \textit{...}: содержимое
+        # вставляется как обычный run (в формуле Word покажет тем же шрифтом,
+        # но без курсива). Без этого LLM-ответы с \text{Схема отстойника:}
+        # остаются сырыми в docx — именно эту багу ловим.
+        for команда in (r"\text", r"\mathrm", r"\textbf", r"\textit"):
+            if expr.startswith(команда, i) and i + len(команда) < len(expr) \
+                    and expr[i + len(команда)] == "{":
+                j = i + len(команда)
+                содержимое, i = _read_group(expr, j)
+                out.append(_math_text(содержимое))
+                break
         else:
-            out.append(_math_text(token))
+            # Не сработало ни одно `\text*` — идём в обычную ветку
+            token, i_new = _read_token(expr, i)
+            if not token:
+                break
+            sub = sup = None
+            i = i_new
+            while i < len(expr) and expr[i] in "_^":
+                marker = expr[i]
+                value, i = _read_script(expr, i + 1)
+                if marker == "_":
+                    sub = value
+                else:
+                    sup = value
+            if sub is not None and sup is not None:
+                out.append(
+                    "<m:sSubSup>"
+                    f"<m:e>{_math_text(token)}</m:e>"
+                    f"<m:sub>{_math_fragments(sub)}</m:sub>"
+                    f"<m:sup>{_math_fragments(sup)}</m:sup>"
+                    "</m:sSubSup>"
+                )
+            elif sub is not None:
+                out.append(
+                    "<m:sSub>"
+                    f"<m:e>{_math_text(token)}</m:e>"
+                    f"<m:sub>{_math_fragments(sub)}</m:sub>"
+                    "</m:sSub>"
+                )
+            elif sup is not None:
+                out.append(
+                    "<m:sSup>"
+                    f"<m:e>{_math_text(token)}</m:e>"
+                    f"<m:sup>{_math_fragments(sup)}</m:sup>"
+                    "</m:sSup>"
+                )
+            else:
+                out.append(_math_text(token))
+            continue  # мы уже обработали subscripts/superscripts сами
+
+        # Сюда падаем только если сработала \text*-ветка — тогда продолжаем цикл
+        continue
+
     return "".join(out)
 
 
