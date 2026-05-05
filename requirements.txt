@@ -17,3 +17,6 @@ boto3>=1.34
 # Tier 1 OCR для тетрадей (CPU-only, без системных зависимостей)
 rapidocr-onnxruntime
 pillow
+# OCR встроенных картинок-схем PDF (опционально). Pure-python, при первом запуске
+# скачает модели ~70 MB. Тянет за собой torch + opencv ~1 GB.
+easyocr

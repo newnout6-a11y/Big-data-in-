@@ -28,6 +28,55 @@ try:
 except ImportError:  # pragma: no cover - optional fallback
     fitz = None
 
+# easyocr — опциональная зависимость для распознавания текста на растровых
+# схемах. Если не установлена — OCR-функционал просто отключается, всё
+# остальное работает.
+try:
+    import easyocr  # type: ignore
+except ImportError:  # pragma: no cover - optional fallback
+    easyocr = None  # type: ignore
+
+_easyocr_reader: Any = None
+_easyocr_init_failed = False
+
+
+def _получить_easyocr_reader() -> Any:
+    """Ленивая инициализация easyocr.Reader (русский + английский, CPU).
+    Первый вызов скачает модели (~70 MB). При неудаче возвращает None.
+    """
+    global _easyocr_reader, _easyocr_init_failed
+    if _easyocr_reader is not None:
+        return _easyocr_reader
+    if _easyocr_init_failed or easyocr is None:
+        return None
+    try:
+        _easyocr_reader = easyocr.Reader(["ru", "en"], gpu=False, verbose=False)
+        return _easyocr_reader
+    except Exception:
+        _easyocr_init_failed = True
+        return None
+
+
+def _ocr_картинки(путь_файла: Path) -> str:
+    """Возвращает распознанный текст с картинки через easyocr (одна строка,
+    разделители — пробелы, до 400 символов). Пустая строка, если OCR
+    недоступен или ничего не распознано.
+    """
+    reader = _получить_easyocr_reader()
+    if reader is None:
+        return ""
+    try:
+        результаты = reader.readtext(str(путь_файла), detail=0, paragraph=True)
+    except Exception:
+        return ""
+    куски = [s.strip() for s in (результаты or []) if s and isinstance(s, str) and s.strip()]
+    if not куски:
+        return ""
+    текст = re.sub(r"\s+", " ", " ".join(куски)).strip()
+    if len(текст) > 400:
+        текст = текст[:397].rstrip() + "…"
+    return текст
+
 try:
     from pptx import Presentation
 except ImportError:  # pragma: no cover - optional dependency
@@ -139,6 +188,7 @@ def ingest_uploaded_files(
     user_id: str | None = None,
     visual_mode: bool = False,
     use_groq_vision: bool = False,
+    use_ocr: bool = False,
     max_groq_pages_per_file: int = виз.MAX_GROQ_PAGES_DEFAULT,
     on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -193,6 +243,7 @@ def ingest_uploaded_files(
                 images_by_page = _извлечь_встроенные_картинки_по_страницам(
                     target,
                     vision_api_key=groq_key if use_groq_vision else "",
+                    use_ocr=use_ocr,
                 )
                 pages = [
                     {
@@ -221,7 +272,7 @@ def ingest_uploaded_files(
                 summary["groq_vision_pages"] += sum(
                     1 for p in visual_pages if p.get("tier_used") == 2)
             else:
-                pages = extract_pages(target)
+                pages = extract_pages(target, use_ocr=use_ocr)
                 visual_meta_by_page = {}
 
             chunks = build_chunks(
@@ -436,10 +487,10 @@ def собрать_картинки_по_страницам(
     return результат
 
 
-def extract_pages(path: Path) -> list[dict[str, Any]]:
+def extract_pages(path: Path, *, use_ocr: bool = False) -> list[dict[str, Any]]:
     ext = path.suffix.lower()
     if ext == ".pdf":
-        return _extract_pdf(path)
+        return _extract_pdf(path, use_ocr=use_ocr)
     if ext == ".docx":
         return _extract_docx(path)
     if ext in {".txt", ".md"}:
@@ -507,8 +558,25 @@ def build_chunks(
     return chunks
 
 
+def _текст_для_эмбеддинга(chunk: dict[str, Any]) -> str:
+    """Объединяет текст чанка с caption'ами его картинок. Так OCR-текст со
+    схем (например «Псевдоожижение, Осаждение, Фильтрование») попадает в
+    эмбеддинг и поиск находит страницу даже если этих слов нет в самом
+    текстовом слое PDF. Сам `chunk['text']` остаётся для отображения.
+    """
+    база = chunk.get("text") or ""
+    captions: list[str] = []
+    for картинка in chunk.get("images") or []:
+        cap = (картинка.get("caption") or "").strip()
+        if cap:
+            captions.append(cap)
+    if not captions:
+        return база
+    return f"{база}\n\nИзображения на странице: {' | '.join(captions)}"
+
+
 def upsert_chunks(client: Any, model: Any, collection: str, chunks: list[dict[str, Any]]) -> None:
-    texts = [chunk["text"] for chunk in chunks]
+    texts = [_текст_для_эмбеддинга(chunk) for chunk in chunks]
     vectors = model.encode(
         ["passage: " + text for text in texts],
         normalize_embeddings=True,
@@ -821,6 +889,7 @@ def _извлечь_картинки_страницы(
     текст_страницы: str = "",
     vision_api_key: str = "",
     фоновые_xref: set[int] | None = None,
+    use_ocr: bool = False,
 ) -> list[dict[str, Any]]:
     """Сохраняет встроенные картинки PDF-страницы и возвращает список с
     описаниями.
@@ -889,6 +958,10 @@ def _извлечь_картинки_страницы(
 
     for xref, файл, относительный in сохранённые:
         caption = привязка.get(xref, "")
+        if not caption and use_ocr:
+            ocr_текст = _ocr_картинки(файл)
+            if ocr_текст:
+                caption = ocr_текст
         if not caption and vision_api_key:
             caption = _vision_caption_картинки(файл, vision_api_key)
         if not caption and fallback_caption:
@@ -902,7 +975,12 @@ def _извлечь_картинки_страницы(
     return результаты
 
 
-def _extract_pdf(path: Path, *, vision_api_key: str = "") -> list[dict[str, Any]]:
+def _extract_pdf(
+    path: Path,
+    *,
+    vision_api_key: str = "",
+    use_ocr: bool = False,
+) -> list[dict[str, Any]]:
     """Возвращает список страниц `{page, text, images}`.
 
     `images` — это список встроенных в PDF картинок, сохранённых на диск под
@@ -926,6 +1004,7 @@ def _extract_pdf(path: Path, *, vision_api_key: str = "") -> list[dict[str, Any]
                         текст_страницы=text,
                         vision_api_key=vision_api_key,
                         фоновые_xref=фоновые,
+                        use_ocr=use_ocr,
                     )
                     if len(text.strip()) > 40 or images:
                         pages.append({"page": index, "text": text, "images": images})
@@ -954,6 +1033,7 @@ def _извлечь_встроенные_картинки_по_страница�
     path: Path,
     *,
     vision_api_key: str = "",
+    use_ocr: bool = False,
 ) -> dict[int, list[dict[str, Any]]]:
     """Сохраняет встроенные в PDF картинки и возвращает индекс `page -> [images]`.
 
@@ -984,6 +1064,7 @@ def _извлечь_встроенные_картинки_по_страница�
                 текст_страницы=текст,
                 vision_api_key=vision_api_key,
                 фоновые_xref=фоновые,
+                use_ocr=use_ocr,
             )
             if картинки:
                 индекс[index] = картинки
