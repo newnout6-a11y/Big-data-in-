@@ -62,12 +62,27 @@ def _ocr_картинки(путь_файла: Path) -> str:
     """Возвращает распознанный текст с картинки через easyocr (одна строка,
     разделители — пробелы, до 400 символов). Пустая строка, если OCR
     недоступен или ничего не распознано.
+
+    ВАЖНО: easyocr под капотом использует cv2.imread, который на Windows
+    не поддерживает не-ASCII символы в пути (пробелы — ок, кириллица — нет).
+    Если путь содержит кириллицу (как наш «C:\\Big data in химия\\…»), imread
+    тихо возвращает None и easyocr возвращает пустой результат. Поэтому
+    читаем файл байтами вручную и декодируем через cv2.imdecode — это
+    не зависит от локали ОС.
     """
     reader = _получить_easyocr_reader()
     if reader is None:
         return ""
     try:
-        результаты = reader.readtext(str(путь_файла), detail=0, paragraph=True)
+        import numpy as np  # easyocr тянет numpy как зависимость
+        import cv2  # easyocr тянет opencv-python-headless
+        данные = np.fromfile(str(путь_файла), dtype=np.uint8)
+        if данные.size == 0:
+            return ""
+        изображение = cv2.imdecode(данные, cv2.IMREAD_COLOR)
+        if изображение is None:
+            return ""
+        результаты = reader.readtext(изображение, detail=0, paragraph=True)
     except Exception:
         return ""
     куски = [s.strip() for s in (результаты or []) if s and isinstance(s, str) and s.strip()]
