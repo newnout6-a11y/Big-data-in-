@@ -43,7 +43,16 @@ import notebooks  # noqa: E402
 
 def _qdrant_client() -> QdrantClient:
     """Тот же путь, что в app.загрузить_qdrant — удалённый если QDRANT_URL,
-    иначе локальный qdrant_db/ рядом со скриптом."""
+    иначе локальный qdrant_db/ рядом со скриптом.
+
+    Если локальная БД занята другим процессом (обычно — запущенный Streamlit),
+    делаем быструю копию во временную папку и работаем с ней: только читаем,
+    оригинал не трогаем. Копия удаляется при выходе через atexit.
+    """
+    import atexit
+    import shutil
+    import tempfile
+
     url = (os.getenv("QDRANT_URL") or "").strip()
     if url:
         return QdrantClient(
@@ -52,7 +61,22 @@ def _qdrant_client() -> QdrantClient:
             prefer_grpc=False,
             timeout=60,
         )
-    return QdrantClient(path=str(Path(__file__).resolve().parent / "qdrant_db"))
+    db_path = Path(__file__).resolve().parent / "qdrant_db"
+    try:
+        return QdrantClient(path=str(db_path))
+    except RuntimeError as exc:
+        if "already accessed" not in str(exc):
+            raise
+        print(
+            f"  ⚠  qdrant_db занят другим процессом (Streamlit запущен?).\n"
+            f"  Копирую во временную папку для чтения…"
+        )
+        tmp_dir = tempfile.mkdtemp(prefix="qdrant_inspect_")
+        tmp_db = os.path.join(tmp_dir, "qdrant_db")
+        shutil.copytree(str(db_path), tmp_db)
+        print(f"  Готово. Временная копия: {tmp_db}\n")
+        atexit.register(shutil.rmtree, tmp_dir, True)
+        return QdrantClient(path=tmp_db)
 
 
 def _найти_тетрадь(подстрока: str, user_id: str) -> dict[str, Any]:
