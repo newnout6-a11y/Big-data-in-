@@ -263,11 +263,15 @@ def _топ_по_тетради(
     искомый_документ: str,
     limit: int = 5,
 ) -> None:
-    """Прогон реального search_notebook. Видно что LLM реально получит."""
+    """Прогон реального search_notebook. Видно что LLM реально получит.
+    Показываем и dense-score, и keyword-буст, и итоговый — чтобы сортировка
+    была понятна (search_notebook сортирует по dense+буст, не по dense)."""
+    токены = notebooks._токены_запроса(question)
     точки = notebooks.search_notebook(
         client, model, тетрадь, question, limit=limit,
     )
     print(f"\n── Топ-{limit} по search_notebook для запроса {question!r} ──")
+    print(f"   (сортировка по dense+keyword; .score у qdrant-point = dense only)\n")
     if not точки:
         print("  (ничего не вернулось)")
         return
@@ -276,14 +280,14 @@ def _топ_по_тетради(
         payload = point.payload or {}
         doc = str(payload.get("document") or "")
         page = payload.get("page")
+        kw = notebooks._keyword_буст(payload, токены)
         mark = ""
         if искомый_документ.lower() in doc.lower() and page == искомая_стр:
             mark = "  ← ИСКОМАЯ СТРАНИЦА"
             искомая_в_топе = True
         print(
-            f"  [{i}] score={point.score:.3f}  "
-            f"{doc}, стр. {page}  "
-            f"chunk={payload.get('chunk_index')}{mark}"
+            f"  [{i}] dense={point.score:.3f}  kw={kw:+.3f}  итог={point.score + kw:.3f}  "
+            f"стр.{page} chunk={payload.get('chunk_index')}{mark}"
         )
     print()
     if not искомая_в_топе:
