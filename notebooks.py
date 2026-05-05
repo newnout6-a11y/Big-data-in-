@@ -15,6 +15,7 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    FilterSelector,
     MatchValue,
     PayloadSchemaType,
     PointStruct,
@@ -307,6 +308,96 @@ def ingest_uploaded_files(
 
     save_store(store)
     return summary
+
+
+def переиндексировать_файл_с_ocr(
+    client: Any,
+    model: Any,
+    notebook_id: str,
+    file_hash: str,
+    *,
+    user_id: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Заново индексирует уже загруженный PDF с включённым OCR картинок.
+
+    Поведение:
+      1) Удаляет все точки этого файла из Qdrant (по фильтру user/notebook/file_hash).
+      2) Перечитывает PDF c `use_ocr=True` — caption'ы картинок-схем
+         заполняются распознанным текстом (например «Отстойник
+         непрерывного действия с вращающимися скребками…»).
+      3) Перестраивает чанки и заливает их в Qdrant.
+      4) Обновляет запись файла в `notebooks.json` (счётчик чанков, флаг).
+
+    Сам PDF на диске и каталог `extracted_images/<file_hash>/` не трогаем —
+    OCR работает по уже сохранённым там картинкам.
+    """
+    user_id = user_id or get_user_id()
+    store = load_store(user_id)
+    notebooks_list = store["users"][user_id]["notebooks"]
+    notebook = next((nb for nb in notebooks_list if nb.get("id") == notebook_id), None)
+    if notebook is None:
+        raise ValueError("Тетрадь не найдена.")
+    file_info = next(
+        (f for f in notebook.get("files", []) if f.get("file_hash") == file_hash),
+        None,
+    )
+    if file_info is None:
+        raise ValueError("Файл не найден в тетради.")
+
+    тип = (file_info.get("type") or "").lower().lstrip(".")
+    if тип != "pdf":
+        raise ValueError("OCR применим только к PDF-файлам.")
+
+    target = Path(file_info.get("path", ""))
+    if not target.exists():
+        raise ValueError(f"Исходный PDF не найден на диске: {target}")
+
+    ensure_collection(client, notebook)
+
+    if on_progress:
+        on_progress("Удаляю старые точки из Qdrant…")
+    try:
+        client.delete(
+            collection_name=notebook["collection"],
+            points_selector=FilterSelector(
+                filter=Filter(must=[
+                    FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+                    FieldCondition(key="notebook_id", match=MatchValue(value=notebook_id)),
+                    FieldCondition(key="file_hash", match=MatchValue(value=file_hash)),
+                ]),
+            ),
+        )
+    except Exception as ошибка:  # pragma: no cover - сетевые/локальные сбои
+        raise ValueError(f"Не удалось удалить старые точки: {ошибка}")
+
+    if on_progress:
+        on_progress("Извлекаю текст и применяю OCR к картинкам…")
+    pages = _extract_pdf(target, use_ocr=True)
+    if not pages:
+        raise ValueError("Не удалось извлечь страницы из PDF.")
+
+    chunks = build_chunks(
+        pages,
+        notebook=notebook,
+        user_id=user_id,
+        file_hash=file_hash,
+        file_path=target,
+        original_name=file_info.get("name", target.name),
+    )
+    if not chunks:
+        raise ValueError("После переиндексации не удалось построить чанки.")
+
+    if on_progress:
+        on_progress(f"Заливаю {len(chunks)} чанков в Qdrant…")
+    upsert_chunks(client, model, notebook["collection"], chunks)
+
+    file_info["chunks"] = len(chunks)
+    file_info["reindexed_at"] = _now_iso()
+    file_info["use_ocr"] = True
+    save_store(store)
+
+    return {"chunks": len(chunks), "pages": len(pages)}
 
 
 def ensure_collection(client: Any, notebook: dict[str, Any]) -> None:
