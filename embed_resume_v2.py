@@ -23,6 +23,8 @@ import uuid
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
+    BinaryQuantization,
+    BinaryQuantizationConfig,
     Distance,
     Modifier,
     PayloadSchemaType,
@@ -71,10 +73,18 @@ def подключиться():
         print(f"Qdrant: локальный {ПАПКА_БД}")
     коллекции = {к.name for к in клиент.get_collections().collections}
     if КОЛЛЕКЦИЯ not in коллекции:
+        # Dense vectors лежат на диске, в RAM держим только бинарные кодировки
+        # (32× меньше). На Qdrant Cloud Free (1 GB RAM) это даёт запас на ~3-5M
+        # точек вместо ~1M без квантования. Recall теряет 2-5%, но reranker
+        # сверху восстанавливает качество практически до оригинала.
         клиент.create_collection(
             collection_name=КОЛЛЕКЦИЯ,
             vectors_config={
-                "dense": VectorParams(size=РАЗМЕР_ВЕКТОРА, distance=Distance.COSINE),
+                "dense": VectorParams(
+                    size=РАЗМЕР_ВЕКТОРА,
+                    distance=Distance.COSINE,
+                    on_disk=True,
+                ),
             },
             sparse_vectors_config={
                 "sparse": SparseVectorParams(
@@ -82,8 +92,11 @@ def подключиться():
                     modifier=Modifier.IDF,
                 ),
             },
+            quantization_config=BinaryQuantization(
+                binary=BinaryQuantizationConfig(always_ram=True),
+            ),
         )
-        print(f"Создана гибридная коллекция {КОЛЛЕКЦИЯ}")
+        print(f"Создана гибридная коллекция {КОЛЛЕКЦИЯ} (binary quantization)")
     for поле, тип in ПОЛЯ_ИНДЕКСОВ:
         try:
             клиент.create_payload_index(КОЛЛЕКЦИЯ, поле, тип)
