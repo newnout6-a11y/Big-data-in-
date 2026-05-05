@@ -18,6 +18,10 @@ on:
         description: "Тянуть txt/ из Drive"
         default: "true"
         required: false
+      iteration:
+        description: "Номер итерации авто-перезапуска (1-10), вручную ставь «1»"
+        default: "1"
+        required: false
 
 jobs:
   vectorize:
@@ -26,6 +30,9 @@ jobs:
     concurrency:
       group: vectorize-existing
       cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -202,3 +209,55 @@ jobs:
             chunks_v2.jsonl
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Авто-перезапуск если остались необработанные файлы
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          if [ ! -f chunks_v2.jsonl ] || [ ! -d all_pdfs ]; then
+            echo "Нечего сравнивать — пропускаю авто-перезапуск"
+            exit 0
+          fi
+          TOTAL=$(ls all_pdfs/ 2>/dev/null | wc -l)
+          PROCESSED=$(python3 -c "
+          import json
+          docs = set()
+          try:
+              with open('chunks_v2.jsonl') as f:
+                  for line in f:
+                      try:
+                          docs.add(json.loads(line).get('document', ''))
+                      except Exception:
+                          pass
+          except FileNotFoundError:
+              pass
+          print(len(docs))
+          ")
+          REMAINING=$((TOTAL - PROCESSED))
+          echo "=== Покрытие ==="
+          echo "Всего файлов: $TOTAL"
+          echo "Обработано: $PROCESSED"
+          echo "Осталось: $REMAINING"
+          if [ "$REMAINING" -le 0 ]; then
+            echo "✅ Всё векторизовано, авто-перезапуск не нужен"
+            exit 0
+          fi
+          # Счётчик итераций через имя run'а в уведомлениях — жёсткий лимит 10 итераций чтобы не уйти в бесконечный цикл
+          ITER=$(echo '${{ github.event.inputs.iteration }}' | tr -d '\n' | tr -d ' ')
+          ITER=${ITER:-1}
+          NEXT=$((ITER + 1))
+          if [ "$NEXT" -gt 10 ]; then
+            echo "⚠ Достигнут лимит итераций (10) — остались файлы, но больше не перезапускаю (для безопасности)"
+            exit 0
+          fi
+          echo "🔄 Перезапуск workflow (итерация $NEXT/10) — осталось $REMAINING файлов"
+          curl -sS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/vectorize-existing.yml/dispatches" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"max_files\":\"0\",\"include_docx\":\"true\",\"include_txt\":\"true\",\"iteration\":\"$NEXT\"}}" \
+            -w "HTTP %{http_code}\n"
+          echo "(Следующий run встанет в очередь через concurrency-group)"
