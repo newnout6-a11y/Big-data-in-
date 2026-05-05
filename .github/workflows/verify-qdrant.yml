@@ -88,4 +88,17 @@ jobs:
               limit=2,
           )
           print(f'Query returned: {[(p.id, p.score) for p in q.points]}')
+
+          # Cleanup: удаляем все smoke-точки, чтобы коллекция оставалась чистой
+          # для реального embed_resume_v2.py. Идентифицируем по payload.smoke=True.
+          from qdrant_client.models import Filter, FieldCondition, MatchValue, FilterSelector
+          c.delete(
+              collection_name=col,
+              points_selector=FilterSelector(filter=Filter(must=[
+                  FieldCondition(key='smoke', match=MatchValue(value=True)),
+              ])),
+              wait=True,
+          )
+          conf3 = c.get_collection(col)
+          print(f'After cleanup points_count = {conf3.points_count}')
           PY
