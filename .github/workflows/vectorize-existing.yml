@@ -53,7 +53,7 @@ jobs:
           printf '%s\n' "$RCLONE_CONFIG_DATA" > ~/.config/rclone/rclone.conf
           rclone listremotes
 
-      - name: Pull state.json from Drive (если есть)
+      - name: Pull state.json + chunks_v2.jsonl из Drive (возобновление)
         env:
           RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
           GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
@@ -61,6 +61,9 @@ jobs:
         run: |
           mkdir -p harvester
           python -m harvester.gdrive_rclone pull-state || echo "(state.json не найден — нормально для первого прогона)"
+          # И chunks_v2.jsonl, если остался от предыдущего руна (резюме).
+          rclone copyto "${GDRIVE_REMOTE}:${GDRIVE_BASE}/chunks_v2.jsonl" chunks_v2.jsonl --no-traverse 2>/dev/null || echo "(chunks_v2.jsonl не найден — начинаем с нуля)"
+          if [ -f chunks_v2.jsonl ]; then echo "Найден chunks_v2.jsonl: $(wc -l < chunks_v2.jsonl) предыдущих чанков"; fi
 
       - name: Free up runner disk
         run: |
@@ -114,22 +117,42 @@ jobs:
           df -h /
 
       - name: Ingest PDFs → chunks_v2.jsonl
+        timeout-minutes: 280
         env:
           HARVESTER_EMAIL: ${{ secrets.HARVESTER_EMAIL }}
           PYTHONUNBUFFERED: "1"
         run: |
-          python -u ingest_v2.py
+          python -u ingest_v2.py || echo "⚠ ingest не завершился полностью (timeout/error), но чанки сохранены инкрементально"
           echo "=== chunks_v2.jsonl stats ==="
           wc -l chunks_v2.jsonl || echo "chunks_v2.jsonl missing"
           du -h chunks_v2.jsonl || true
 
+      - name: Push chunks_v2.jsonl back to Drive (резюме для следующего руна)
+        if: always()
+        env:
+          RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
+        run: |
+          if [ -f chunks_v2.jsonl ]; then
+            echo "=== Push chunks_v2.jsonl ($(wc -l < chunks_v2.jsonl) чанков) в Drive ==="
+            rclone copyto chunks_v2.jsonl "${GDRIVE_REMOTE}:${GDRIVE_BASE}/chunks_v2.jsonl" --progress
+          else
+            echo "chunks_v2.jsonl missing — нечего пушить"
+          fi
+
       - name: Embed chunks → Qdrant Cloud
+        if: always()
         env:
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
           PYTHONUNBUFFERED: "1"
         run: |
-          python -u embed_resume_v2.py
+          if [ -f chunks_v2.jsonl ]; then
+            python -u embed_resume_v2.py
+          else
+            echo "chunks_v2.jsonl missing — embed пропускаю"
+          fi
 
       - name: Push state.json back to Drive
         env:
@@ -147,5 +170,6 @@ jobs:
           path: |
             harvester/state.json
             harvester/logs/
+            chunks_v2.jsonl
           if-no-files-found: ignore
           retention-days: 14
