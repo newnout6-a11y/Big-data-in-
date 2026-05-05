@@ -6,21 +6,17 @@ name: vectorize-existing
 on:
   workflow_dispatch:
     inputs:
-      drive_path_pdf:
-        description: "Папка PDF в Drive (rclone-формат)"
-        default: "gdrive:big-data/pdf"
-        required: true
-      drive_path_docx:
-        description: "Папка DOCX в Drive (опционально, можно оставить пустым)"
-        default: "gdrive:big-data/docx"
-        required: false
-      drive_path_txt:
-        description: "Папка TXT в Drive (опционально)"
-        default: "gdrive:big-data/txt"
-        required: false
       max_files:
         description: "Лимит количества файлов (0 = без лимита). Полезно при первом тесте."
         default: "0"
+        required: false
+      include_docx:
+        description: "Тянуть docx/ из Drive"
+        default: "true"
+        required: false
+      include_txt:
+        description: "Тянуть txt/ из Drive"
+        default: "true"
         required: false
 
 jobs:
@@ -60,6 +56,8 @@ jobs:
       - name: Pull state.json from Drive (если есть)
         env:
           RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
         run: |
           mkdir -p harvester
           python -m harvester.gdrive_rclone pull-state || echo "(state.json не найден — нормально для первого прогона)"
@@ -74,25 +72,28 @@ jobs:
           df -h /
 
       - name: Pull PDFs/DOCX/TXT from Drive
+        env:
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
         run: |
           mkdir -p all_pdfs
-          PDF_PATH='${{ github.event.inputs.drive_path_pdf }}'
-          DOCX_PATH='${{ github.event.inputs.drive_path_docx }}'
-          TXT_PATH='${{ github.event.inputs.drive_path_txt }}'
+          BASE="${GDRIVE_REMOTE}:${GDRIVE_BASE}"
           MAX='${{ github.event.inputs.max_files }}'
+          INCLUDE_DOCX='${{ github.event.inputs.include_docx }}'
+          INCLUDE_TXT='${{ github.event.inputs.include_txt }}'
 
           COMMON_FLAGS="--transfers 16 --checkers 32 --progress --stats=10s"
 
-          echo "=== Pull PDF: $PDF_PATH ==="
-          rclone copy "$PDF_PATH" all_pdfs/ --include '*.pdf' $COMMON_FLAGS || echo "PDF copy failed (продолжаю)"
+          echo "=== Pull PDF: ${BASE}/pdf ==="
+          rclone copy "${BASE}/pdf" all_pdfs/ --include '*.pdf' $COMMON_FLAGS || echo "PDF copy failed (продолжаю)"
 
-          if [ -n "$DOCX_PATH" ]; then
-            echo "=== Pull DOCX: $DOCX_PATH ==="
-            rclone copy "$DOCX_PATH" all_pdfs/ --include '*.docx' $COMMON_FLAGS || echo "DOCX copy failed (продолжаю)"
+          if [ "$INCLUDE_DOCX" = "true" ]; then
+            echo "=== Pull DOCX: ${BASE}/docx ==="
+            rclone copy "${BASE}/docx" all_pdfs/ --include '*.docx' $COMMON_FLAGS || echo "DOCX copy failed (продолжаю)"
           fi
-          if [ -n "$TXT_PATH" ]; then
-            echo "=== Pull TXT: $TXT_PATH ==="
-            rclone copy "$TXT_PATH" all_pdfs/ --include '*.txt' $COMMON_FLAGS || echo "TXT copy failed (продолжаю)"
+          if [ "$INCLUDE_TXT" = "true" ]; then
+            echo "=== Pull TXT: ${BASE}/txt ==="
+            rclone copy "${BASE}/txt" all_pdfs/ --include '*.txt' $COMMON_FLAGS || echo "TXT copy failed (продолжаю)"
           fi
 
           # Опционально обрезать до max_files (для быстрого теста)
@@ -131,6 +132,8 @@ jobs:
       - name: Push state.json back to Drive
         env:
           RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
         run: |
           python -m harvester.gdrive_rclone push --state-only || echo "Push state failed (не критично)"
 
