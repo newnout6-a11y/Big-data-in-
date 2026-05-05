@@ -440,6 +440,78 @@ def notebook_documents(notebook: dict[str, Any]) -> list[str]:
     return result
 
 
+_СТОП_СЛОВА_ПОИСКА: set[str] = {
+    "как", "что", "где", "когда", "это", "этот", "эта", "эти", "тот", "та", "те",
+    "при", "для", "или", "из", "на", "по", "от", "до", "над", "под", "без", "про",
+    "и", "а", "но", "же", "ли", "бы", "не", "ни", "ты", "вы", "он", "она", "они",
+    "мы", "я", "его", "её", "их", "сам", "сама", "сами", "свой", "своя",
+    "действия", "выглядит", "называется", "такое", "таких", "такая", "такие",
+    "the", "a", "an", "is", "are", "of", "in", "on", "to", "for", "with", "and",
+    "or", "by", "from", "at", "as", "how", "what", "where", "which", "it",
+}
+
+
+def _стем(слово: str) -> str:
+    """Наивный стемминг: для слов длиной ≥6 обрезает до первых 6 символов,
+    чтобы «отстойник/отстойника/отстойнике» имели общий корень. Короткие
+    слова (3-5 симв) оставляем как есть. Аналог стемминга Портера для
+    русского у нас нет без доп. зависимостей — этого приближения хватает
+    для keyword-бустинга.
+    """
+    if len(слово) >= 6:
+        return слово[:6]
+    return слово
+
+
+def _токены_запроса(вопрос: str) -> set[str]:
+    """Разбивает запрос на нормализованные стем-токены (низкий регистр,
+    длина >=3, без стоп-слов). Стемминг даёт совпадение разных словоформ
+    («отстойник» в запросе ↔ «отстойнике» в тексте).
+    """
+    import re as _re
+    токены = _re.findall(r"[\wёЁ]+", (вопрос or "").lower(), _re.UNICODE)
+    результат: set[str] = set()
+    for t in токены:
+        if len(t) < 3:
+            continue
+        if t in _СТОП_СЛОВА_ПОИСКА:
+            continue
+        результат.add(_стем(t))
+    return результат
+
+
+def _keyword_буст(payload: dict[str, Any], стемы_запроса: set[str]) -> float:
+    """Возвращает дополнительный скор-буст по числу стем-токенов запроса,
+    встречающихся в тексте чанка и caption'ах его картинок.
+
+    Буст = 0.07 за каждый уникальный совпавший стем, с потолком 0.35.
+    Этого хватает, чтобы страница с буквальным совпадением слов из
+    запроса (через OCR-caption картинки) обогнала страницу с более
+    «плотным» dense-сигналом, но без точных слов.
+    """
+    if not стемы_запроса:
+        return 0.0
+    import re as _re
+    куски: list[str] = []
+    текст_чанка = (payload.get("text") or "")
+    if текст_чанка:
+        куски.append(текст_чанка)
+    for картинка in payload.get("images") or []:
+        if isinstance(картинка, dict):
+            cap = картинка.get("caption") or ""
+            if cap:
+                куски.append(cap)
+    общий = " ".join(куски).lower()
+    if not общий:
+        return 0.0
+    слова_текста = _re.findall(r"[\wёЁ]+", общий, _re.UNICODE)
+    стемы_текста = {_стем(w) for w in слова_текста if len(w) >= 3}
+    совпало = len(стемы_запроса & стемы_текста)
+    if совпало == 0:
+        return 0.0
+    return min(0.35, 0.07 * совпало)
+
+
 def search_notebook(
     client: Any,
     model: Any,
@@ -457,20 +529,34 @@ def search_notebook(
         FieldCondition(key="user_id", match=MatchValue(value=user_id)),
         FieldCondition(key="notebook_id", match=MatchValue(value=notebook["id"])),
     ])
+    # Берём глубокий пул кандидатов (limit*6), чтобы до re-rank'а точно
+    # дошли страницы с буквальным совпадением ключевых слов — они могут
+    # иметь чуть более низкий dense-score, но быть правильным ответом
+    # (например, слайд-схема, где ключевой текст только на картинке).
     response = client.query_points(
         collection_name=notebook["collection"],
         query=vector,
-        limit=max(limit * 3, limit),
+        limit=max(limit * 6, limit),
         query_filter=query_filter,
         with_payload=True,
     )
-    points = []
+    токены = _токены_запроса(question)
+    ранжированные: list[tuple[float, Any]] = []
     for point in response.points:
         payload = point.payload or {}
         text = payload.get("text") or ""
-        if text and float(point.score) >= min_score:
-            points.append(point)
-    return points[:limit]
+        if not text:
+            continue
+        dense = float(point.score)
+        буст = _keyword_буст(payload, токены)
+        итоговый = dense + буст
+        # Страницы с реальным keyword-совпадением пропускаем даже при
+        # dense-score ниже min_score: без этого слайды-заголовки с
+        # критическим текстом только в картинке отсекались бы до rerank'а.
+        if dense >= min_score or буст >= 0.15:
+            ранжированные.append((итоговый, point))
+    ранжированные.sort(key=lambda pair: pair[0], reverse=True)
+    return [point for _, point in ранжированные[:limit]]
 
 
 def notebook_fragments(
@@ -651,19 +737,36 @@ def build_chunks(
 
 def _текст_для_эмбеддинга(chunk: dict[str, Any]) -> str:
     """Объединяет текст чанка с caption'ами его картинок. Так OCR-текст со
-    схем (например «Псевдоожижение, Осаждение, Фильтрование») попадает в
-    эмбеддинг и поиск находит страницу даже если этих слов нет в самом
-    текстовом слое PDF. Сам `chunk['text']` остаётся для отображения.
+    схем (например «Отстойник непрерывного действия с вращающимися
+    скребками») попадает в эмбеддинг и поиск находит страницу даже если
+    этих слов нет в самом текстовом слое PDF. Сам `chunk['text']` остаётся
+    для отображения.
+
+    Caption'ы встраиваются как естественное продолжение текста слайда, без
+    служебного префикса «Изображения на странице:». Префикс даёт модели
+    сигнал «это метаданные, можно недовешивать», из-за чего короткие
+    текстовые слайды с критически важным текстом ТОЛЬКО в картинке
+    проигрывали ранжирование длинным текстам с совпадающими словами
+    (например, слайду про экстракцию, где «отстойник» просто упоминается).
     """
-    база = chunk.get("text") or ""
+    база = (chunk.get("text") or "").strip()
     captions: list[str] = []
+    видели: set[str] = set()
     for картинка in chunk.get("images") or []:
         cap = (картинка.get("caption") or "").strip()
-        if cap:
-            captions.append(cap)
+        if not cap:
+            continue
+        ключ = cap.lower()
+        if ключ in видели:
+            continue
+        видели.add(ключ)
+        captions.append(cap)
     if not captions:
         return база
-    return f"{база}\n\nИзображения на странице: {' | '.join(captions)}"
+    хвост = "\n".join(captions)
+    if база:
+        return f"{база}\n\n{хвост}"
+    return хвост
 
 
 def upsert_chunks(client: Any, model: Any, collection: str, chunks: list[dict[str, Any]]) -> None:
