@@ -121,11 +121,40 @@ jobs:
         env:
           HARVESTER_EMAIL: ${{ secrets.HARVESTER_EMAIL }}
           PYTHONUNBUFFERED: "1"
+          RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
         run: |
-          python -u ingest_v2.py || echo "⚠ ingest не завершился полностью (timeout/error), но чанки сохранены инкрементально"
+          set +e
+          DEST="${GDRIVE_REMOTE}:${GDRIVE_BASE}/chunks_v2.jsonl"
+
+          # Фоновый пушер: раз в 15 минут копируем актуальный chunks_v2.jsonl на Drive.
+          # Так даже при крэше runner'а максимум теряем 15 минут работы.
+          (
+            while sleep 900; do
+              if [ -s chunks_v2.jsonl ]; then
+                LINES=$(wc -l < chunks_v2.jsonl 2>/dev/null || echo 0)
+                BYTES=$(stat -c%s chunks_v2.jsonl 2>/dev/null || echo 0)
+                echo "[$(date -u +%H:%M:%S)] [periodic-push] chunks=$LINES bytes=$BYTES → Drive…"
+                rclone copyto chunks_v2.jsonl "$DEST" --quiet 2>&1 | tail -3
+              fi
+            done
+          ) &
+          PUSH_PID=$!
+          echo "Periodic push started (pid=$PUSH_PID, every 15 min)"
+
+          python -u ingest_v2.py
+          INGEST_RC=$?
+
+          kill "$PUSH_PID" 2>/dev/null || true
+          wait "$PUSH_PID" 2>/dev/null || true
+          echo "Periodic push stopped (ingest exit code: $INGEST_RC)"
+
           echo "=== chunks_v2.jsonl stats ==="
           wc -l chunks_v2.jsonl || echo "chunks_v2.jsonl missing"
           du -h chunks_v2.jsonl || true
+          # Не возвращаем ненулевой exit, чтобы следующий шаг (push + embed) запустился
+          exit 0
 
       - name: Push chunks_v2.jsonl back to Drive (резюме для следующего руна)
         if: always()
