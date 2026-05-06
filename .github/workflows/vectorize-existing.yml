@@ -177,40 +177,11 @@ jobs:
             echo "chunks_v2.jsonl missing — нечего пушить"
           fi
 
-      - name: Embed chunks → Qdrant Cloud
-        if: always()
-        env:
-          QDRANT_URL: ${{ secrets.QDRANT_URL }}
-          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-          PYTHONUNBUFFERED: "1"
-        run: |
-          if [ -f chunks_v2.jsonl ]; then
-            python -u embed_resume_v2.py
-          else
-            echo "chunks_v2.jsonl missing — embed пропускаю"
-          fi
-
-      - name: Push state.json back to Drive
-        env:
-          RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
-          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
-          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
-        run: |
-          python -m harvester.gdrive_rclone push --state-only || echo "Push state failed (не критично)"
-
-      - name: Upload run artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vectorize-existing-${{ github.run_id }}
-          path: |
-            harvester/state.json
-            harvester/logs/
-            chunks_v2.jsonl
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Авто-перезапуск если остались необработанные файлы
+      # Авто-перезапуск ПЕРЕД embed: чтобы даже если embed убьётся по job-timeout, следующий run уже был запущен.
+      # Также выставляет ENV-флаг ALL_DONE=true если всё обработано (тогда идём в embed),
+      # или ALL_DONE=false если есть ещё работа (тогда embed пропускаем и сохраняем время для следующей итерации).
+      - name: Авто-перезапуск и подсчёт покрытия
+        id: coverage
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
@@ -218,6 +189,7 @@ jobs:
           set +e
           if [ ! -f chunks_v2.jsonl ] || [ ! -d all_pdfs ]; then
             echo "Нечего сравнивать — пропускаю авто-перезапуск"
+            echo "all_done=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           TOTAL=$(ls all_pdfs/ 2>/dev/null | wc -l)
@@ -241,10 +213,12 @@ jobs:
           echo "Обработано: $PROCESSED"
           echo "Осталось: $REMAINING"
           if [ "$REMAINING" -le 0 ]; then
-            echo "✅ Всё векторизовано, авто-перезапуск не нужен"
+            echo "✅ Всё векторизовано, идём в embed"
+            echo "all_done=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Счётчик итераций через имя run'а в уведомлениях — жёсткий лимит 10 итераций чтобы не уйти в бесконечный цикл
+          echo "all_done=false" >> "$GITHUB_OUTPUT"
+          # Счётчик итераций через input — жёсткий лимит 10 итераций чтобы не уйти в бесконечный цикл
           ITER=$(echo '${{ github.event.inputs.iteration }}' | tr -d '\n' | tr -d ' ')
           ITER=${ITER:-1}
           NEXT=$((ITER + 1))
@@ -261,3 +235,37 @@ jobs:
             -d "{\"ref\":\"main\",\"inputs\":{\"max_files\":\"0\",\"include_docx\":\"true\",\"include_txt\":\"true\",\"iteration\":\"$NEXT\"}}" \
             -w "HTTP %{http_code}\n"
           echo "(Следующий run встанет в очередь через concurrency-group)"
+
+      - name: Embed chunks → Qdrant Cloud (только на финальной итерации)
+        if: always() && steps.coverage.outputs.all_done == 'true'
+        env:
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if [ -f chunks_v2.jsonl ]; then
+            python -u embed_resume_v2.py
+          else
+            echo "chunks_v2.jsonl missing — embed пропускаю"
+          fi
+
+      - name: Push state.json back to Drive
+        if: always()
+        env:
+          RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
+        run: |
+          python -m harvester.gdrive_rclone push --state-only || echo "Push state failed (не критично)"
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vectorize-existing-${{ github.run_id }}
+          path: |
+            harvester/state.json
+            harvester/logs/
+            chunks_v2.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
