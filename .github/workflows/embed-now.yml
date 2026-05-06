@@ -6,9 +6,14 @@ name: embed-now
 
 on:
   workflow_dispatch:
+    inputs:
+      iteration:
+        description: "Номер итерации авто-перезапуска (1-10)"
+        default: "1"
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: embed-now
@@ -58,9 +63,60 @@ jobs:
           wc -l chunks_v2.jsonl
 
       - name: Embed chunks → Qdrant Cloud
+        id: embed
         env:
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
           PYTHONUNBUFFERED: "1"
+        # Job timeout 350 мин — если embed не успевает полностью, будет убит на ~5h45m от старта job-а.
+        # Чтобы auto-restart всё равно выполнился — ограничиваем embed до 280 мин (буфер ~70 мин на auto-restart и cleanup).
+        timeout-minutes: 280
+        continue-on-error: true
         run: |
           python -u embed_resume_v2.py
+
+      - name: Авто-перезапуск embed-now если остались незалитые чанки
+        if: always()
+        env:
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          # Считаем сколько чанков в chunks_v2.jsonl всего и сколько в Qdrant.
+          if [ ! -f chunks_v2.jsonl ]; then
+            echo "chunks_v2.jsonl missing — нечего рестартить"
+            exit 0
+          fi
+          TOTAL=$(wc -l < chunks_v2.jsonl)
+          POINTS=$(python3 -c "
+          import os
+          from qdrant_client import QdrantClient
+          c = QdrantClient(url=os.environ['QDRANT_URL'], api_key=os.environ['QDRANT_API_KEY'], prefer_grpc=False, timeout=60)
+          print(c.count('knowledge_hybrid', exact=True).count)
+          " 2>/dev/null || echo 0)
+          echo "=== Покрытие embed ==="
+          echo "Чанков в chunks_v2.jsonl: $TOTAL"
+          echo "Точек в Qdrant: $POINTS"
+          # Если в Qdrant больше или примерно равно (разница < 100) — всё залито.
+          if [ "$POINTS" -ge $((TOTAL - 100)) ]; then
+            echo "✅ Всё залито (или разница меньше 100). Перезапуск не нужен"
+            exit 0
+          fi
+          ITER=$(echo '${{ github.event.inputs.iteration }}' | tr -d '\n' | tr -d ' ')
+          ITER=${ITER:-1}
+          NEXT=$((ITER + 1))
+          if [ "$NEXT" -gt 10 ]; then
+            echo "⚠ Достигнут лимит итераций (10) — остались незалитые чанки, но больше не перезапускаю"
+            exit 0
+          fi
+          REMAIN=$((TOTAL - POINTS))
+          echo "🔄 Перезапуск embed-now (итерация $NEXT/10) — осталось $REMAIN чанков"
+          curl -sS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/embed-now.yml/dispatches" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"iteration\":\"$NEXT\"}}" \
+            -w "HTTP %{http_code}\n"
+          echo "(Следующий run встанет в очередь через concurrency-group)"
