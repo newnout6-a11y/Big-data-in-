@@ -1,0 +1,66 @@
+name: embed-now
+
+# Одноразовый embed: тянет chunks_v2.jsonl с Drive, эмбедит всё в Qdrant Cloud.
+# Идемпотентен: уже залитые точки (по text_hash UUID) пропускаются.
+# Может запускаться параллельно с vectorize-existing/harvest — конфликтов нет.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: embed-now
+  cancel-in-progress: false
+
+jobs:
+  embed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      RCLONE_CONFIG_CONTENT: ${{ secrets.RCLONE_CONFIG }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install rclone
+        run: |
+          curl -L https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          unzip -q /tmp/rclone.zip -d /tmp
+          sudo mv /tmp/rclone-*-linux-amd64/rclone /usr/local/bin/
+          rclone version | head -1
+
+      - name: Write rclone.conf from secret
+        run: |
+          mkdir -p /home/runner/.config/rclone
+          printf '%s' "$RCLONE_CONFIG_CONTENT" > /home/runner/.config/rclone/rclone.conf
+          chmod 600 /home/runner/.config/rclone/rclone.conf
+
+      - name: Pull chunks_v2.jsonl с Drive (snapshot)
+        env:
+          RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
+        run: |
+          rclone copyto "${GDRIVE_REMOTE}:${GDRIVE_BASE}/chunks_v2.jsonl" chunks_v2.jsonl --progress
+          echo "=== chunks_v2.jsonl info ==="
+          ls -lh chunks_v2.jsonl
+          wc -l chunks_v2.jsonl
+
+      - name: Embed chunks → Qdrant Cloud
+        env:
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u embed_resume_v2.py
