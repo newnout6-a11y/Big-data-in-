@@ -88,6 +88,16 @@ def main(argv=None):
         код2, дл2 = _запустить(команда_ingest, окруж)
         отчёт["steps"]["ingest"] = {"return_code": код2, "seconds": round(дл2, 1)}
 
+    # Шаг 2.5 — РАННИЙ push в Drive после ingest (до медленного embed).
+    # Гарантирует что PDF + chunks_v2.jsonl + state.json уже на Drive
+    # ДАЖЕ ЕСЛИ embed зависнет на часы и runner будет убит timeout-ом.
+    if os.getenv("GDRIVE_REMOTE") or os.getenv("RCLONE_CONFIG"):
+        команда_early_push = [sys.executable, "-m", "harvester.gdrive_rclone", "push"]
+        код_ep, дл_ep = _запустить(команда_early_push, окруж)
+        отчёт["steps"]["gdrive_push_after_ingest"] = {
+            "return_code": код_ep, "seconds": round(дл_ep, 1),
+        }
+
     # Шаг 3 — векторизация
     if not args.skip_embed and time.time() < дедлайн:
         команда_embed = [sys.executable, "embed_resume_v2.py"]
@@ -103,7 +113,10 @@ def main(argv=None):
     # Шаг 5 — Google Drive push через rclone (если задан GDRIVE_REMOTE
     # или указан путь к rclone.conf через RCLONE_CONFIG).
     # Заливает all_pdfs/, harvested_meta/, extracted_images/ и state.json.
-    if (os.getenv("GDRIVE_REMOTE") or os.getenv("RCLONE_CONFIG")) and time.time() < дедлайн:
+    # ВАЖНО: push безусловный, даже если дедлайн уже прошёл — иначе
+    # скачанные на runner PDF умрут вместе с ним. Хотя бы state.json
+    # обязан попасть в Drive чтобы следующая итерация не начала всё сначала.
+    if os.getenv("GDRIVE_REMOTE") or os.getenv("RCLONE_CONFIG"):
         команда_push = [sys.executable, "-m", "harvester.gdrive_rclone", "push"]
         код5, дл5 = _запустить(команда_push, окруж)
         отчёт["steps"]["gdrive_push"] = {

@@ -20,14 +20,23 @@ import httpx
 
 
 КАТЕГОРИИ_ПО_УМОЛЧАНИЮ = [
+    # IT/ML (исходный набор)
     "cs.LG",
     "cs.AI",
     "cs.CL",
     "stat.ML",
-    "physics.chem-ph",
-    "cond-mat.mtrl-sci",
-    "q-bio.BM",
-    "q-bio.QM",
+    # Химия / материалы (расширенный)
+    "physics.chem-ph",       # Chemical Physics
+    "physics.atm-clus",      # Atomic and Molecular Clusters
+    "physics.bio-ph",        # Biological Physics
+    "physics.app-ph",        # Applied Physics (часто катализ/материалы)
+    "cond-mat.mtrl-sci",     # Materials Science
+    "cond-mat.soft",         # Soft Condensed Matter (полимеры, коллоиды)
+    "cond-mat.stat-mech",    # Statistical Mechanics (термодинамика)
+    # Биохимия / мед
+    "q-bio.BM",              # Biomolecules
+    "q-bio.QM",              # Quantitative Methods
+    "q-bio.MN",              # Molecular Networks
 ]
 
 _NS = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
