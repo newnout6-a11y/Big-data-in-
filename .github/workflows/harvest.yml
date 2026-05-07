@@ -119,6 +119,10 @@ jobs:
           # Google Drive через rclone:
           GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
           GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
+          # В harvest pipeline картинки из PDF извлекать не нужно
+          # (раздувают Drive, не используются в RAG для harvest-корпуса).
+          # Notebooks (UI) запускают свой ingest без этой переменной.
+          HARVEST_SKIP_IMAGES: '1'
         run: |
           # Запускаем harvester.loop — он сам бесконечно итерирует:
           #   harvest_full → push в Drive → sleep → harvest_full → ...
