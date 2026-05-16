@@ -21,6 +21,7 @@ from .arxiv import Документ
 БАЗА = "https://api.core.ac.uk/v3/search/works"
 
 ЗАПРОСЫ_ПО_УМОЛЧАНИЮ = [
+    # Исходный набор
     "cheminformatics",
     "molecular property prediction",
     "graph neural network chemistry",
@@ -29,6 +30,40 @@ from .arxiv import Документ
     "high-performance computing",
     "natural language processing transformer",
     "computer vision neural network",
+    # === Элементы / свойства ===
+    "hydrogen storage materials",
+    "carbon capture utilization",
+    "nitrogen catalyst ammonia",
+    "oxygen reduction catalyst",
+    "lithium battery anode",
+    "transition metal complex",
+    "lanthanide chemistry",
+    "halogen reactivity",
+    # === Области химии ===
+    "inorganic chemistry",
+    "organic chemistry synthesis",
+    "analytical chemistry",
+    "physical chemistry",
+    "biochemistry",
+    "polymer chemistry",
+    "supramolecular chemistry",
+    "organometallic chemistry",
+    "photochemistry",
+    "electrochemistry",
+    "nanochemistry",
+    "green chemistry",
+    "medicinal chemistry",
+    # === Характеризация ===
+    "X-ray crystallography",
+    "NMR spectroscopy",
+    "mass spectrometry",
+    # === Материалы ===
+    "metal organic framework",
+    "perovskite solar cell",
+    "zeolite catalyst",
+    "thermoelectric materials",
+    "semiconductor",
+    "fuel cell membrane",
 ]
 
 

@@ -24,6 +24,7 @@ from .arxiv import Документ
 ПОЛЯ = "title,authors,year,openAccessPdf,abstract,externalIds,publicationDate"
 
 ЗАПРОСЫ_ПО_УМОЛЧАНИЮ = [
+    # ML × chemistry (исходный набор)
     "machine learning chemistry",
     "graph neural network molecule",
     "cheminformatics property prediction",
@@ -34,6 +35,47 @@ from .arxiv import Документ
     "reinforcement learning robotics",
     "transformer language model efficient",
     "diffusion model image generation",
+    # === Элементы и их свойства ===
+    "hydrogen evolution catalyst",
+    "carbon dioxide capture",
+    "nitrogen fixation electrochemistry",
+    "oxygen evolution reaction",
+    "lithium battery cathode material",
+    "transition metal catalyst",
+    "lanthanide complex luminescence",
+    "halogen bonding crystal engineering",
+    # === Области химии ===
+    "inorganic synthesis",
+    "organic methodology synthesis",
+    "analytical chemistry chromatography",
+    "physical chemistry thermodynamics",
+    "supramolecular chemistry",
+    "organometallic compound",
+    "polymer synthesis controlled",
+    "biochemistry enzyme",
+    "medicinal chemistry",
+    "green chemistry catalysis",
+    "photocatalysis water splitting",
+    "electrocatalysis fuel cell",
+    "nanoparticle synthesis",
+    "asymmetric catalysis",
+    # === Спектроскопия и характеризация ===
+    "NMR spectroscopy analysis",
+    "X-ray crystallography",
+    "Raman spectroscopy materials",
+    "mass spectrometry",
+    # === Материалы ===
+    "metal organic framework",
+    "perovskite solar cell",
+    "zeolite catalysis",
+    "thin film deposition",
+    "battery solid electrolyte",
+    "semiconductor band structure",
+    # === Биохимия ===
+    "protein structure",
+    "drug target",
+    "natural product synthesis",
+    "peptide synthesis",
 ]
 
 

@@ -50,11 +50,11 @@ on:
         description: "Минимальный год публикации"
         default: "2020"
       run_ingest:
-        description: "Запускать ingest_v2 (true/false). По умолчанию false — только скачивание + push в Drive."
-        default: "false"
+        description: "Запускать ingest_v2 (true/false). По умолчанию true — весь пайплайн в CI."
+        default: "true"
       run_embed:
-        description: "Запускать embed_resume_v2 (true/false). По умолчанию false — векторизация делается локально."
-        default: "false"
+        description: "Запускать embed_resume_v2 (true/false). По умолчанию true — векторизация в Qdrant Cloud из CI."
+        default: "true"
 
 permissions:
   contents: read
@@ -119,6 +119,10 @@ jobs:
           # Google Drive через rclone:
           GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
           GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
+          # В harvest pipeline картинки из PDF извлекать не нужно
+          # (раздувают Drive, не используются в RAG для harvest-корпуса).
+          # Notebooks (UI) запускают свой ingest без этой переменной.
+          HARVEST_SKIP_IMAGES: '1'
         run: |
           # Запускаем harvester.loop — он сам бесконечно итерирует:
           #   harvest_full → push в Drive → sleep → harvest_full → ...
@@ -129,12 +133,15 @@ jobs:
           # известны как ненадёжные у GitHub Actions: задержки до 30+ минут,
           # пропуски при высокой нагрузке).
           #
-          # ingest/embed выключены по умолчанию — векторизация делается локально.
+          # ingest/embed включены по умолчанию — весь пайплайн крутится в CI без
+          # участия локальной машины. embed_resume_v2 идемпотентен по text_hash,
+          # параллельные запуски не дублируют точки. Чтобы отключить — запускай вручную
+          # через workflow_dispatch с run_ingest=false / run_embed=false.
           ARGS=()
-          if [ "${{ github.event.inputs.run_ingest || 'false' }}" != "true" ]; then
+          if [ "${{ github.event.inputs.run_ingest || 'true' }}" != "true" ]; then
             ARGS+=(--skip-ingest)
           fi
-          if [ "${{ github.event.inputs.run_embed || 'false' }}" != "true" ]; then
+          if [ "${{ github.event.inputs.run_embed || 'true' }}" != "true" ]; then
             ARGS+=(--skip-embed)
           fi
           python -m harvester.loop \

@@ -1,0 +1,275 @@
+name: vectorize-existing
+# Одноразовая векторизация PDF, которые УЖЕ лежат на Google Drive (не качает заново
+# с arXiv/OpenAlex). Запускать вручную, когда хочется загнать существующий корпус
+# в Qdrant без полного цикла harvest. После этого обычный harvest cron подхватит
+# дельту в обычном режиме.
+on:
+  workflow_dispatch:
+    inputs:
+      max_files:
+        description: "Лимит количества файлов (0 = без лимита). Полезно при первом тесте."
+        default: "0"
+        required: false
+      include_docx:
+        description: "Тянуть docx/ из Drive"
+        default: "true"
+        required: false
+      include_txt:
+        description: "Тянуть txt/ из Drive"
+        default: "true"
+        required: false
+      iteration:
+        description: "Номер итерации авто-перезапуска (1-10), вручную ставь «1»"
+        default: "1"
+        required: false
+
+jobs:
+  vectorize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    concurrency:
+      group: vectorize-existing
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone --version
+
+      - name: Write rclone.conf from secret
+        env:
+          RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          if [ -z "$RCLONE_CONFIG_DATA" ]; then
+            echo "RCLONE_CONFIG не задан — Google Drive недоступен. Стоп."
+            exit 1
+          fi
+          mkdir -p ~/.config/rclone
+          printf '%s\n' "$RCLONE_CONFIG_DATA" > ~/.config/rclone/rclone.conf
+          rclone listremotes
+
+      - name: Pull state.json + chunks_v2.jsonl из Drive (возобновление)
+        env:
+          RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
+        run: |
+          mkdir -p harvester
+          python -m harvester.gdrive_rclone pull-state || echo "(state.json не найден — нормально для первого прогона)"
+          # И chunks_v2.jsonl, если остался от предыдущего руна (резюме).
+          rclone copyto "${GDRIVE_REMOTE}:${GDRIVE_BASE}/chunks_v2.jsonl" chunks_v2.jsonl --no-traverse 2>/dev/null || echo "(chunks_v2.jsonl не найден — начинаем с нуля)"
+          if [ -f chunks_v2.jsonl ]; then echo "Найден chunks_v2.jsonl: $(wc -l < chunks_v2.jsonl) предыдущих чанков"; fi
+
+      - name: Free up runner disk
+        run: |
+          # На ubuntu-latest пред-кэшировано ~10-15 GB всякого .NET/Android/Haskell.
+          # Сносим, освобождаем место под PDF.
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean || true
+          df -h /
+
+      - name: Pull PDFs/DOCX/TXT from Drive
+        env:
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
+        run: |
+          mkdir -p all_pdfs
+          BASE="${GDRIVE_REMOTE}:${GDRIVE_BASE}"
+          MAX='${{ github.event.inputs.max_files }}'
+          INCLUDE_DOCX='${{ github.event.inputs.include_docx }}'
+          INCLUDE_TXT='${{ github.event.inputs.include_txt }}'
+
+          COMMON_FLAGS="--transfers 16 --checkers 32 --progress --stats=10s"
+
+          echo "=== Pull PDF: ${BASE}/pdf ==="
+          rclone copy "${BASE}/pdf" all_pdfs/ --include '*.pdf' $COMMON_FLAGS || echo "PDF copy failed (продолжаю)"
+
+          if [ "$INCLUDE_DOCX" = "true" ]; then
+            echo "=== Pull DOCX: ${BASE}/docx ==="
+            rclone copy "${BASE}/docx" all_pdfs/ --include '*.docx' $COMMON_FLAGS || echo "DOCX copy failed (продолжаю)"
+          fi
+          if [ "$INCLUDE_TXT" = "true" ]; then
+            echo "=== Pull TXT: ${BASE}/txt ==="
+            rclone copy "${BASE}/txt" all_pdfs/ --include '*.txt' $COMMON_FLAGS || echo "TXT copy failed (продолжаю)"
+          fi
+
+          # Опционально обрезать до max_files (для быстрого теста)
+          if [ "$MAX" != "0" ] && [ -n "$MAX" ]; then
+            echo "=== Trimming to $MAX files ==="
+            cd all_pdfs
+            count=0
+            for f in *; do
+              count=$((count + 1))
+              if [ $count -gt $MAX ]; then rm -f "$f"; fi
+            done
+            cd ..
+          fi
+
+          echo "=== Result ==="
+          ls all_pdfs/ | wc -l
+          du -sh all_pdfs/
+          df -h /
+
+      - name: Ingest PDFs → chunks_v2.jsonl
+        timeout-minutes: 280
+        env:
+          HARVESTER_EMAIL: ${{ secrets.HARVESTER_EMAIL }}
+          PYTHONUNBUFFERED: "1"
+          RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
+          # В CI pipeline (vectorize-existing/harvest) картинки из PDF не нужны —
+          # они только раздувают Drive. Notebooks (UI) запускают свой ingest
+          # без этой переменной — там картинки нужны для визуального RAG.
+          HARVEST_SKIP_IMAGES: '1'
+        run: |
+          set +e
+          DEST="${GDRIVE_REMOTE}:${GDRIVE_BASE}/chunks_v2.jsonl"
+
+          # Фоновый пушер: раз в 15 минут копируем актуальный chunks_v2.jsonl на Drive.
+          # Так даже при крэше runner'а максимум теряем 15 минут работы.
+          (
+            while sleep 900; do
+              if [ -s chunks_v2.jsonl ]; then
+                LINES=$(wc -l < chunks_v2.jsonl 2>/dev/null || echo 0)
+                BYTES=$(stat -c%s chunks_v2.jsonl 2>/dev/null || echo 0)
+                echo "[$(date -u +%H:%M:%S)] [periodic-push] chunks=$LINES bytes=$BYTES → Drive…"
+                rclone copyto chunks_v2.jsonl "$DEST" --quiet 2>&1 | tail -3
+              fi
+            done
+          ) &
+          PUSH_PID=$!
+          echo "Periodic push started (pid=$PUSH_PID, every 15 min)"
+
+          python -u ingest_v2.py
+          INGEST_RC=$?
+
+          kill "$PUSH_PID" 2>/dev/null || true
+          wait "$PUSH_PID" 2>/dev/null || true
+          echo "Periodic push stopped (ingest exit code: $INGEST_RC)"
+
+          echo "=== chunks_v2.jsonl stats ==="
+          wc -l chunks_v2.jsonl || echo "chunks_v2.jsonl missing"
+          du -h chunks_v2.jsonl || true
+          # Не возвращаем ненулевой exit, чтобы следующий шаг (push + embed) запустился
+          exit 0
+
+      - name: Push chunks_v2.jsonl back to Drive (резюме для следующего руна)
+        if: always()
+        env:
+          RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
+        run: |
+          if [ -f chunks_v2.jsonl ]; then
+            echo "=== Push chunks_v2.jsonl ($(wc -l < chunks_v2.jsonl) чанков) в Drive ==="
+            rclone copyto chunks_v2.jsonl "${GDRIVE_REMOTE}:${GDRIVE_BASE}/chunks_v2.jsonl" --progress
+          else
+            echo "chunks_v2.jsonl missing — нечего пушить"
+          fi
+
+      # Авто-перезапуск ПЕРЕД embed: чтобы даже если embed убьётся по job-timeout, следующий run уже был запущен.
+      # Также выставляет ENV-флаг ALL_DONE=true если всё обработано (тогда идём в embed),
+      # или ALL_DONE=false если есть ещё работа (тогда embed пропускаем и сохраняем время для следующей итерации).
+      - name: Авто-перезапуск и подсчёт покрытия
+        id: coverage
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          if [ ! -f chunks_v2.jsonl ] || [ ! -d all_pdfs ]; then
+            echo "Нечего сравнивать — пропускаю авто-перезапуск"
+            echo "all_done=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TOTAL=$(ls all_pdfs/ 2>/dev/null | wc -l)
+          PROCESSED=$(python3 -c "
+          import json
+          docs = set()
+          try:
+              with open('chunks_v2.jsonl') as f:
+                  for line in f:
+                      try:
+                          docs.add(json.loads(line).get('document', ''))
+                      except Exception:
+                          pass
+          except FileNotFoundError:
+              pass
+          print(len(docs))
+          ")
+          REMAINING=$((TOTAL - PROCESSED))
+          echo "=== Покрытие ==="
+          echo "Всего файлов: $TOTAL"
+          echo "Обработано: $PROCESSED"
+          echo "Осталось: $REMAINING"
+          if [ "$REMAINING" -le 0 ]; then
+            echo "✅ Всё векторизовано, идём в embed"
+            echo "all_done=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "all_done=false" >> "$GITHUB_OUTPUT"
+          # Счётчик итераций через input — жёсткий лимит 10 итераций чтобы не уйти в бесконечный цикл
+          ITER=$(echo '${{ github.event.inputs.iteration }}' | tr -d '\n' | tr -d ' ')
+          ITER=${ITER:-1}
+          NEXT=$((ITER + 1))
+          if [ "$NEXT" -gt 10 ]; then
+            echo "⚠ Достигнут лимит итераций (10) — остались файлы, но больше не перезапускаю (для безопасности)"
+            exit 0
+          fi
+          echo "🔄 Перезапуск workflow (итерация $NEXT/10) — осталось $REMAINING файлов"
+          curl -sS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/vectorize-existing.yml/dispatches" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"max_files\":\"0\",\"include_docx\":\"true\",\"include_txt\":\"true\",\"iteration\":\"$NEXT\"}}" \
+            -w "HTTP %{http_code}\n"
+          echo "(Следующий run встанет в очередь через concurrency-group)"
+
+      - name: Embed chunks → Qdrant Cloud (только на финальной итерации)
+        if: always() && steps.coverage.outputs.all_done == 'true'
+        env:
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if [ -f chunks_v2.jsonl ]; then
+            python -u embed_resume_v2.py
+          else
+            echo "chunks_v2.jsonl missing — embed пропускаю"
+          fi
+
+      - name: Push state.json back to Drive
+        if: always()
+        env:
+          RCLONE_CONFIG: /home/runner/.config/rclone/rclone.conf
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
+        run: |
+          python -m harvester.gdrive_rclone push --state-only || echo "Push state failed (не критично)"
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vectorize-existing-${{ github.run_id }}
+          path: |
+            harvester/state.json
+            harvester/logs/
+            chunks_v2.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
