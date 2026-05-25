@@ -22,6 +22,8 @@ from pathlib import Path
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
+    BinaryQuantization,
+    BinaryQuantizationConfig,
     Distance,
     Modifier,
     PayloadSchemaType,
@@ -59,24 +61,29 @@ def _создать_или_получить(клиент: QdrantClient, recreate
         клиент.delete_collection(КОЛЛЕКЦИЯ)
         если_есть = False
     if not если_есть:
-        # Локально без binary quantization — расчёт на полный recall и
-        # на то, что у ноутбука RAM не настолько ограничена как у Cloud Free.
+        # Dense-векторы и sparse-индекс на диске, binary quantization в RAM —
+        # экономит ~30x RAM vs. полные float32. Recall теряет 2-5%, но reranker
+        # восстанавливает качество.
         клиент.create_collection(
             collection_name=КОЛЛЕКЦИЯ,
             vectors_config={
                 "dense": VectorParams(
                     size=РАЗМЕР_ВЕКТОРА,
                     distance=Distance.COSINE,
+                    on_disk=True,
                 ),
             },
             sparse_vectors_config={
                 "sparse": SparseVectorParams(
-                    index=SparseIndexParams(on_disk=False),
+                    index=SparseIndexParams(on_disk=True),
                     modifier=Modifier.IDF,
                 ),
             },
+            quantization_config=BinaryQuantization(
+                binary=BinaryQuantizationConfig(always_ram=True),
+            ),
         )
-        print(f"Создана {КОЛЛЕКЦИЯ} (dense+sparse, без квантования)")
+        print(f"Создана {КОЛЛЕКЦИЯ} (dense+sparse, on_disk + binary quantization)")
     for поле, тип in ПОЛЯ_ИНДЕКСОВ:
         try:
             клиент.create_payload_index(КОЛЛЕКЦИЯ, поле, тип)

@@ -6,6 +6,7 @@ import mimetypes
 import html
 import sys
 import uuid
+import time as _time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -79,25 +80,58 @@ st.set_page_config(
 12. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО дословно копировать в ответ: URL'ы и ссылки (http://, https://, doi.org, creativecommons.org), названия лицензий (CC BY, BY-NC-ND), авторские блоки (имена авторов, аффилиации университетов, адреса, e-mail, телефоны), названия журналов и издательств, ключевые слова в формате «K e y w o r d s», метки разделов вида «A B S T R A C T» / «I N T R O D U C T I O N» / «A R T I C L E I N F O», DOI, ORCID, номера страниц журнала. Это технические артефакты PDF, а не факты по теме. Если фрагмент содержит подобный мусор — ИГНОРИРУЙ его и излагай ТОЛЬКО содержательную часть фрагмента своими словами на русском."""
 
 
+def _rss_mb():
+    """Текущий RSS процесса в МБ (для диагностики памяти)."""
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / (1024 * 1024)
+    except ImportError:
+        return 0.0
+
+
 @st.cache_resource
 def загрузить_модель():
-    return SentenceTransformer("intfloat/multilingual-e5-base")
+    _s = _time.time()
+    print(f"[mem] загрузить_модель: старт, RSS={_rss_mb():.0f} MB", flush=True)
+    м = SentenceTransformer("intfloat/multilingual-e5-base")
+    print(f"[mem] загрузить_модель: готово за {_time.time()-_s:.1f}с, RSS={_rss_mb():.0f} MB", flush=True)
+    return м
 
 
 @st.cache_resource
 def загрузить_qdrant():
     """Удалённый Qdrant если задан QDRANT_URL, иначе локальный qdrant_db/."""
+    _s = _time.time()
+    print(f"[mem] загрузить_qdrant: старт, RSS={_rss_mb():.0f} MB", flush=True)
     url = os.getenv("QDRANT_URL", "").strip()
     if url:
-        return QdrantClient(
+        print(f"[mem] загрузить_qdrant: подключаюсь к Cloud {url[:50]}...", flush=True)
+        кл = QdrantClient(
             url=url,
             api_key=os.getenv("QDRANT_API_KEY") or None,
             prefer_grpc=False,
             timeout=60,
         )
+        print(f"[mem] загрузить_qdrant: Cloud готов за {_time.time()-_s:.1f}с, RSS={_rss_mb():.0f} MB", flush=True)
+        return кл
     # qdrant_db/ лежит в корне репо, а app.py теперь в ui/ — поднимаемся на уровень.
     папка = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "qdrant_db")
-    return QdrantClient(path=папка)
+    print(f"[mem] загрузить_qdrant: открываю локальный {папка}", flush=True)
+    кл = QdrantClient(path=папка)
+    try:
+        коллекции = кл.get_collections().collections
+        print(f"[mem] загрузить_qdrant: {len(коллекции)} коллекций, RSS={_rss_mb():.0f} MB", flush=True)
+        for к in коллекции:
+            try:
+                инфо = кл.get_collection(к.name)
+                print(f"[mem]   {к.name}: {инфо.points_count} точек, "
+                      f"status={инфо.status}", flush=True)
+            except Exception:
+                print(f"[mem]   {к.name}: не удалось получить инфо", flush=True)
+    except Exception as e:
+        print(f"[mem] загрузить_qdrant: ошибка перечисления: {e}", flush=True)
+    print(f"[mem] загрузить_qdrant: готово за {_time.time()-_s:.1f}с, RSS={_rss_mb():.0f} MB", flush=True)
+    return кл
 
 
 @st.cache_resource
@@ -109,25 +143,33 @@ def выбрать_коллекцию():
       - новая_схема=True если payload содержит domain/subdomain/...
       - гибрид=True если можно делать sparse-prefetch + RRF
     """
+    _s = _time.time()
+    print(f"[mem] выбрать_коллекцию: старт, RSS={_rss_mb():.0f} MB", flush=True)
     клиент = загрузить_qdrant()
     try:
         имена = {к.name for к in клиент.get_collections().collections}
     except Exception as e:
-        # Раньше эта ошибка молча заглушалась → код падал на коллекцию «химия»
-        # со старой схемой и пользователь видел странное поведение без логов.
         print(f"[выбрать_коллекцию] не удалось получить список коллекций: {e}", file=sys.stderr)
         имена = set()
+    print(f"[mem] выбрать_коллекцию: коллекции={имена}, RSS={_rss_mb():.0f} MB", flush=True)
     if "knowledge_hybrid" in имена:
+        print(f"[mem] выбрать_коллекцию: выбрана knowledge_hybrid за {_time.time()-_s:.1f}с", flush=True)
         return "knowledge_hybrid", True, True
     if "knowledge" in имена:
+        print(f"[mem] выбрать_коллекцию: выбрана knowledge за {_time.time()-_s:.1f}с", flush=True)
         return "knowledge", True, False
+    print(f"[mem] выбрать_коллекцию: выбрана химия (старая) за {_time.time()-_s:.1f}с", flush=True)
     return "химия", False, False
 
 
 @st.cache_resource
 def прототипы_доменов():
+    _s = _time.time()
+    print(f"[mem] прототипы_доменов: старт, RSS={_rss_mb():.0f} MB", flush=True)
     модель = загрузить_модель()
-    return подготовить_прототипы(модель)
+    рез = подготовить_прототипы(модель)
+    print(f"[mem] прототипы_доменов: готово за {_time.time()-_s:.1f}с, RSS={_rss_mb():.0f} MB", flush=True)
+    return рез
 
 
 def похоже_на_библиографию(текст):
