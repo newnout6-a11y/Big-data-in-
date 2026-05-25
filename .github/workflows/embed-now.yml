@@ -73,7 +73,7 @@ jobs:
         timeout-minutes: 280
         continue-on-error: true
         run: |
-          python -u embed_resume_v2.py
+          python -u pipeline/embed_resume_v2.py
 
       - name: Авто-перезапуск embed-now если остались незалитые чанки
         if: always()

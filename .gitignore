@@ -15,6 +15,7 @@ all_pdfs/
 rejected_pdfs/
 user_documents/
 extracted_images/
+*.pdf
 
 # Кэш визуальной обработки тетрадей (рендеры, OCR, captions, бюджет Groq Vision)
 visual_index/
@@ -40,8 +41,12 @@ __pycache__/
 # Временные файлы runtime
 _tunnel*.log
 _streamlit*.log
+_codex_*.log
 qr.png
-exports/anki/
+exports/
+
+# Личные файлы (скрины, эксперименты, заметки) — не часть проекта
+личное/
 
 # IDE / OS
 .vscode/
@@ -58,3 +63,21 @@ env/
 
 # Бэкапы перед ingest
 *.bak
+
+# Windows NUL artifacts
+NUL
+
+# Qdrant storage (локальная)
+qdrant_storage/
+
+# Временные выходные файлы
+output.txt
+knowledge_hybrid_export.jsonl
+
+# Тестовые / отладочные файлы
+kiro_tests/
+test_debug.py
+test_encoding.py
+test_imports.py
+test_partial.py
+test_script.py

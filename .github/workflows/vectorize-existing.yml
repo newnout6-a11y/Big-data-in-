@@ -154,7 +154,7 @@ jobs:
           PUSH_PID=$!
           echo "Periodic push started (pid=$PUSH_PID, every 15 min)"
 
-          python -u ingest_v2.py
+          python -u pipeline/ingest_v2.py
           INGEST_RC=$?
 
           kill "$PUSH_PID" 2>/dev/null || true
@@ -248,7 +248,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           if [ -f chunks_v2.jsonl ]; then
-            python -u embed_resume_v2.py
+            python -u pipeline/embed_resume_v2.py
           else
             echo "chunks_v2.jsonl missing — embed пропускаю"
           fi

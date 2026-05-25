@@ -1,4 +1,0 @@
-C:\Big data in химия\app.py:78: UserWarning: Local mode is not recommended for collections with more than 20,000 points. Collection <химия> contains 48110 points. Consider using Qdrant in Docker or Qdrant Cloud for better performance with large datasets.
-  return QdrantClient(path=папка)
-C:\Big data in химия\notebooks.py:216: UserWarning: Payload indexes have no effect in the local Qdrant. Please use server Qdrant if you need payload indexes.
-  client.create_payload_index(collection, field, schema)
