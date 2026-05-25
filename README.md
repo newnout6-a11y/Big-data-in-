@@ -225,18 +225,19 @@ python pipeline/embed_resume_v2.py
 
 ## Харвестер
 
-Автоматический сбор научных документов из 8 открытых источников:
+Автоматический сбор научных документов из 8 открытых источников (+ Unpaywall как fallback):
 
-| Источник | Тип | Описание |
-|----------|-----|----------|
-| arXiv | PDF | cs.LG, physics.chem-ph, cond-mat.mtrl-sci, q-bio |
-| OpenAlex | PDF | Concepts: cheminformatics, ML, chemistry, materials |
-| Europe PMC | PDF | Полные тексты медбио + смежная химия |
-| Semantic Scholar | PDF | 200M+ публикаций с OA PDF |
-| ChemRxiv | PDF | Препринты по химии (может быть за CF) |
-| КиберЛенинка | PDF | OAI-PMH, русскоязычные статьи |
-| Stack Exchange | TXT | Q+A как синтетические документы |
-| CORE | PDF | 130M+ OA документов (нужен API-ключ) |
+| Источник | API | Rate limit | Что берём |
+|----------|-----|------------|-----------|
+| arXiv | Atom XML | 3 сек/запрос | PDF, ~14 категорий (cs.LG, physics.chem-ph, cond-mat.mtrl-sci, q-bio) |
+| OpenAlex | REST | 0.5 сек | PDF, 19 концептов (cheminformatics, ML, chemistry, materials...) |
+| Europe PMC | REST | 0.5 сек | PDF, ~80 тематических запросов (DFT, CRISPR, MOF...) |
+| Semantic Scholar | Graph API | 1 сек, backoff при 429 | PDF, 40+ запросов, фильтр `openAccessPdf` |
+| ChemRxiv | JSON API | 1 сек, CF-protection | PDF, препринты по химии (при 403 — fallback через OpenAlex) |
+| КиберЛенинка | OAI-PMH | 0.5 сек | PDF, русскоязычные статьи (стем-фильтр по scope) |
+| Stack Exchange | REST | 0.5 сек + backoff | TXT (Q+A), 13 сайтов: chemistry, ai, stackoverflow, math... |
+| CORE | REST v3 | 6.5 сек (free: 10 req/мин) | PDF, 130M+ OA (нужен бесплатный ключ) |
+| Unpaywall | REST | ~100K/день | Вспомогательный: OA-копия по DOI при провале скачивания |
 
 ```bash
 # Однократный запуск:
@@ -246,15 +247,19 @@ python -m harvester.run --budget 500
 python -m harvester.harvest_full --budget 200
 
 # Бесконечный цикл (с рандомными паузами):
-python -m harvester.loop --work-min 15 30 --sleep-min 20 40
+python -m harvester.loop --work-min-low 15 --work-min-high 30 --sleep-min-low 20 --sleep-min-high 40
 ```
 
 Особенности:
-- **Кросс-источниковый дедуп** — нормализация DOI/arxiv-id, один документ скачивается один раз
-- **Балансировка доменов** — не допускает перекоса корпуса (chem/it/other)
-- **Unpaywall fallback** — если источник отдаёт paywall-DOI, ищет OA-копию
-- **Google Drive sync** — через rclone, без коммитов в git
+- **Бесконечный цикл** — `harvester.loop` крутит harvest→ingest→embed с рандомными паузами (jitter ±10%); при ошибке — пауза 5 мин и продолжение
+- **Кросс-источниковый дедуп** — нормализация DOI/arxiv-id, один документ из разных источников скачивается один раз
+- **Балансировка доменов** — автоклассификация chem/it/other по ключевым словам, идеальная пропорция 45/45/10, отстающий домен получает больший бюджет
+- **Rate limit handling** — индивидуальные паузы на источник; 429 → exponential backoff; браузерные заголовки для скачивания PDF
+- **Unpaywall fallback** — если основной PDF-url недоступен (paywall, 403), ищет OA-копию через Unpaywall по DOI
+- **Google Drive sync** — через rclone, данные НЕ коммитятся в git
 - **S3 backup** — опциональная синхронизация в S3-совместимое хранилище
+
+Подробнее: [`документация/HARVESTER.md`](документация/HARVESTER.md)
 
 ---
 
@@ -262,10 +267,12 @@ python -m harvester.loop --work-min 15 30 --sleep-min 20 40
 
 | Workflow | Назначение |
 |----------|-----------|
-| `harvest.yml` | Сбор документов + ingest + embed (workflow_dispatch) |
+| `harvest.yml` | Сбор + ingest + embed в бесконечном цикле (до 5.5 часов) |
 | `embed-now.yml` | Одноразовый эмбед chunks_v2.jsonl → Qdrant Cloud |
 | `vectorize-existing.yml` | Массовая векторизация существующих чанков |
 | `verify-qdrant.yml` | Проверка состояния коллекции в Qdrant Cloud |
+
+**harvest.yml** — ключевой workflow. Вместо ненадёжного cron (задержки до 30+ мин у GitHub Actions) runner запускает `harvester.loop` — бесконечный цикл внутри одного run (`timeout-minutes: 350`). Каждая итерация: harvest → ingest_v2 → embed_resume_v2 → sync в Google Drive. Concurrency: один run, без cancel-in-progress.
 
 Секреты: `QDRANT_URL`, `QDRANT_API_KEY`, `HARVESTER_EMAIL`, `RCLONE_CONFIG`, `GDRIVE_BASE`.
 
