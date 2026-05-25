@@ -1,72 +1,56 @@
-# Harvester — автосбор корпуса
+# Harvester
 
-Скачивает свежие PDF/тексты из открытых источников по теме «химия + IT + смежное».
+Автоматический сбор научных документов из открытых источников для базы знаний.
 
 ## Источники
 
-| Модуль | Что | Особенности |
-|---|---|---|
-| `sources/arxiv.py` | cs.LG, cs.AI, stat.ML, physics.chem-ph, cond-mat.mtrl-sci, q-bio.BM | Atom API, ≥3 сек между запросами |
-| `sources/chemrxiv.py` | Все препринты с PDF | JSON API; CF может блокировать с CI-IP |
-| `sources/openalex.py` | Cheminformatics, ML, Chemistry, Materials, CS | REST с курсором; нужен email в User-Agent |
-| `sources/europepmc.py` | OA full-text по 8 ключевым запросам | REST, стабильный курсорный пейджинг |
-| `sources/cyberleninka.py` | RU OAI-PMH (по дате) | Метаданные стабильны, PDF — CDN, может блокироваться |
-| `sources/stackexchange.py` | Q+top answer (chemistry, ai, datascience, cs) | Без ключа: 10 000 запросов/день |
-| `sources/semantic_scholar.py` | 200M+ публикаций, только с OA PDF | Без ключа 100 req/5min; можно указать `SEMANTIC_SCHOLAR_API_KEY` |
-| `sources/core_api.py` | 130M+ OA-документов (CORE) | Требует `CORE_API_KEY` env; free tier 10 req/min, 1000/day |
-| `sources/unpaywall.py` | Helper, не источник. По DOI ищет OA-копию | Fallback при paywall у openalex/europepmc |
+| Источник | Формат | API |
+|----------|--------|-----|
+| arXiv | PDF | Atom API |
+| OpenAlex | PDF | REST (concepts) |
+| Europe PMC | PDF | REST search |
+| Semantic Scholar | PDF | Graph API |
+| ChemRxiv | PDF | JSON API |
+| КиберЛенинка | PDF | OAI-PMH |
+| Stack Exchange | TXT | REST API |
+| CORE | PDF | REST v3 (нужен ключ) |
 
-## Запуск локально
-
-```bash
-pip install -r requirements.txt
-python -m harvester.run --budget 300 --year-min 2020 --email you@example.com
-```
-
-Или сразу полный пайплайн (harvest → ingest → embed):
+## Быстрый старт
 
 ```bash
-python -m harvester.harvest_full --budget 300 --email you@example.com
+# Собрать 100 документов:
+python -m harvester.run --budget 100
+
+# End-to-end (harvest + ingest + embed):
+python -m harvester.harvest_full --budget 200
+
+# Бесконечный цикл:
+python -m harvester.loop --work-min 15 30 --sleep-min 20 40
 ```
 
-PDF/.txt попадают в `all_pdfs/`, метаданные — в `harvested_meta/`. Состояние
-(курсоры, скачанные `doc_id`) — в `harvester/state.json`.
+## Ключевые файлы
 
-## Бесконечный режим — локально
+| Файл | Назначение |
+|------|-----------|
+| `run.py` | Оркестратор: обходит все источники, скачивает PDF/TXT |
+| `harvest_full.py` | End-to-end: harvest → ingest_v2 → embed_resume_v2 |
+| `loop.py` | Бесконечный цикл с рандомными паузами |
+| `state.py` | Состояние: курсоры + дедуп (state.json) |
+| `домены.py` | Классификация chem/it/other для балансировки |
+| `gdrive_rclone.py` | Синхронизация в Google Drive |
+| `s3_upload.py` | Синхронизация в S3 |
+| `sources/` | Адаптеры для каждого источника |
 
-Самый простой вариант: парсер крутится у тебя на машине, спарсенные
-PDF/DOCX/TXT/метаданные и `state.json` уезжают прямо в Google Drive
-через rclone. Никаких git push'ей с данными.
+## Переменные окружения
 
-```bash
-# 1) Установить rclone и авторизовать gdrive remote — гайд в
-#    документация/GOOGLE_DRIVE.md
-# 2) В .env (или env-переменными):
-#      GDRIVE_REMOTE=gdrive
-#      GDRIVE_BASE=big-data
-#      HARVESTER_EMAIL=you@example.com
+| Переменная | Обязательная | Описание |
+|-----------|:---:|----------|
+| `HARVESTER_EMAIL` | рекомендуется | Email для User-Agent (OpenAlex, Unpaywall) |
+| `CORE_API_KEY` | нет | Ключ CORE API (без него CORE пропускается) |
+| `SEMANTIC_SCHOLAR_API_KEY` | нет | Ключ S2 (повышает лимиты) |
+| `GDRIVE_REMOTE` | нет | rclone remote для Drive |
+| `S3_ENDPOINT_URL` | нет | URL S3-хранилища |
 
-python -m harvester.loop --budget 500
-```
+## Подробная документация
 
-`harvester.loop` бесконечно крутит `harvest_full`. До парсинга — pull
-свежего state.json из Drive, после ingest+embed — push новых
-PDF/DOCX/TXT/meta + extracted_images + state.json в Drive.
-
-Полный гайд: [`документация/GOOGLE_DRIVE.md`](../документация/GOOGLE_DRIVE.md).
-
-## Бесконечный режим — GitHub Actions
-
-См. `.github/workflows/harvest.yml`. Запускается **по запросу**
-(`workflow_dispatch`): раннер собирает свежие документы, ингестит,
-векторизует и пушит чанки в Qdrant Cloud (по env `QDRANT_URL` +
-`QDRANT_API_KEY`). `state.json` **не коммитится** обратно в репо —
-если задан секрет `RCLONE_CONFIG`, чекпоинт и корпус уезжают в Drive.
-
-Полный гайд: `документация/CRON_HARVESTER.md`.
-
-## Этика
-
-Используются ТОЛЬКО открытые легальные API. Никаких Sci-Hub / LibGen /
-зеркал платных журналов. Все источники требуют только щадящий rate-limit и
-User-Agent с email — никаких прокси/обходов.
+→ [`документация/HARVESTER.md`](../документация/HARVESTER.md)

@@ -1,186 +1,144 @@
-# Отправка корпуса в Google Drive (rclone)
+# Синхронизация с Google Drive
 
-Парсер шлёт результаты прямо в твою папку на Google Drive — без коммитов
-в git, без S3, без постоянных пушей. Работает локально (`harvester.loop`)
-и в GitHub Actions.
+## Зачем
 
-Под капотом — [`rclone`](https://rclone.org/), стандартный CLI для
-синхронизации с облачными хранилищами. Все вызовы делаются через
-маленькую обёртку `harvester/gdrive_rclone.py`.
+Харвестер собирает PDF и метаданные, которые не коммитятся в git (слишком большие). Вместо этого они синхронизируются в Google Drive через `rclone` — бесплатно, надёжно, доступно отовсюду.
 
-## Что и куда заливается
+---
 
-Структура папок в Drive (под корнем `<remote>:<base>/`, по умолчанию
-`gdrive:big-data/`):
-
-```
-gdrive:big-data/
-├── pdf/         ← все *.pdf из all_pdfs/
-├── docx/        ← все *.docx из all_pdfs/
-├── txt/         ← все *.txt  из all_pdfs/ (StackExchange Q+A и т. п.)
-├── meta/        ← JSON-метаданные из harvested_meta/
-├── images/      ← картинки из PDF, извлечённые в extracted_images/
-└── state/
-    └── state.json   ← чекпоинт парсера (cursor'ы + downloaded_ids)
-```
-
-`state.json` синкается на каждом прогоне (rclone сам сравнивает по mtime
-и size, не льёт зря). PDF/DOCX/TXT/meta/images дедуплицируются rclone'ом по
-имени и размеру — повторно те же файлы не уезжают.
-
-Корневую папку и имя remote'а можно сменить через env:
-- `GDRIVE_REMOTE` (default `gdrive`)
-- `GDRIVE_BASE` (default `big-data`)
-
-## Шаг 1. Установить rclone
+## Установка rclone
 
 ### Windows
-
-```powershell
+```bash
 winget install Rclone.Rclone
+# или скачать: https://rclone.org/downloads/
 ```
 
-Или скачать zip с https://rclone.org/downloads/, распаковать куда
-угодно и добавить директорию с `rclone.exe` в `PATH`.
+### Linux/macOS
+```bash
+curl https://rclone.org/install.sh | sudo bash
+```
 
-### Linux / WSL / macOS
+---
+
+## Настройка remote
 
 ```bash
-curl -fsSL https://rclone.org/install.sh | sudo bash
-```
-
-Проверить:
-
-```bash
-rclone version
-```
-
-## Шаг 2. Авторизовать Google Drive remote
-
-```powershell
 rclone config
 ```
 
-Дальше пошагово (в скобках — что нажимать):
-
-1. `n` — New remote
-2. Имя: **`gdrive`** (если назвать иначе — придётся прописать
-   `GDRIVE_REMOTE=…` в env)
-3. Storage type: набери `drive` и Enter (Google Drive)
-4. `client_id` — пусто (Enter)
-5. `client_secret` — пусто (Enter)
-6. Scope: `1` (full access — `drive`)
-7. `service_account_file` — пусто (Enter)
-8. Edit advanced config? — `n`
-9. Use auto config? — `y` → откроется браузер, **залогинься в нужный
-   Google аккаунт**, разреши доступ.
-10. Configure as Shared Drive? — `n` (если не используешь Shared Drives)
-11. Yes this is OK — `y`
-12. `q` — Quit config
+Шаги:
+1. `n` (new remote)
+2. Имя: `gdrive`
+3. Storage: `drive` (Google Drive)
+4. Client ID/Secret: оставить пустым (используется встроенный)
+5. Scope: `drive` (полный доступ)
+6. Root folder ID: оставить пустым
+7. Авторизация: откроется браузер → войти в Google аккаунт → разрешить
+8. Team drive: `n`
+9. Подтвердить
 
 Проверка:
-
 ```bash
-rclone lsd gdrive:        # должен показать список папок твоего Drive
+rclone lsd gdrive:
 ```
 
-## Шаг 3. Прописать env (для парсера)
+---
 
-Создай в корне репо `.env`:
+## Конфигурация проекта
 
+В `.env`:
 ```env
-# Парсер увидит эти переменные через python-dotenv (или через явный export).
-# Минимум для работы Drive:
 GDRIVE_REMOTE=gdrive
 GDRIVE_BASE=big-data
-
-# Email для User-Agent OpenAlex / Unpaywall:
-HARVESTER_EMAIL=ты@example.com
 ```
 
-`rclone.conf` обычно лежит в:
-- Windows: `%APPDATA%\rclone\rclone.conf`
-- Linux/macOS: `~/.config/rclone/rclone.conf`
+- `GDRIVE_REMOTE` — имя rclone remote (по умолчанию `gdrive`)
+- `GDRIVE_BASE` — корневая папка в Drive (по умолчанию `big-data`)
 
-Если он лежит в нестандартном месте, прописать `RCLONE_CONFIG=/полный/путь/rclone.conf`.
+---
 
-## Шаг 4. Запустить парсер
+## Структура в Drive
 
-```bash
-pip install -r harvester/requirements.txt   # на всякий случай
-python -m harvester.loop --budget 500
+```
+gdrive:big-data/
+├── pdf/              ← all_pdfs/*.pdf
+├── docx/             ← all_pdfs/*.docx
+├── txt/              ← all_pdfs/*.txt
+├── meta/             ← harvested_meta/*.json
+└── state.json        ← harvester/state.json
 ```
 
-Что произойдёт:
-1. **Перед** парсингом — `rclone copyto gdrive:big-data/state/state.json
-   harvester/state.json` (если файла в Drive нет — стартуем с нуля).
-2. Парсер качает свежие документы → `all_pdfs/` + `harvested_meta/`,
-   ингестит, пушит чанки в Qdrant.
-3. **После** парсинга — `rclone copy ...` для PDF/DOCX/TXT/meta/images и
-   обновление `state.json` в Drive.
-4. Loop спит 20–40 минут, повторяет.
+---
 
-В Drive ты сразу увидишь как растёт `pdf/`, `docx/`, `txt/`, `meta/`, `images/`,
-а `state/state.json` обновляется на каждой итерации.
+## Использование
 
-## Полезные команды
+### Загрузить в Drive
 
 ```bash
-# Проверить всё (без реальной заливки):
-python -m harvester.gdrive_rclone push --dry-run
+python -m harvester.gdrive_rclone upload
+```
 
-# Залить только state.json (быстрая проверка кредов после rclone config):
-python -m harvester.gdrive_rclone push --state-only
+Загружает:
+- Все файлы из `all_pdfs/` (разделённые по типу: pdf/, docx/, txt/)
+- Все JSON из `harvested_meta/`
+- Текущий `harvester/state.json`
 
-# Полный sync:
-python -m harvester.gdrive_rclone push
+### Скачать state.json из Drive
 
-# Скачать актуальный state.json из Drive:
+```bash
 python -m harvester.gdrive_rclone pull-state
 ```
 
-## GitHub Actions (опционально)
+Полезно для CI: перед запуском харвестера скачиваем последний state, после — загружаем обновлённый.
 
-Workflow `.github/workflows/harvest.yml` тоже умеет в rclone — для
-ручных прогонов через `workflow_dispatch`. Что нужно настроить:
+---
 
-1. Создать секрет **`RCLONE_CONFIG`** в Settings → Secrets and variables
-   → Actions. Содержимое — вывод команды:
-   ```powershell
-   type "$env:APPDATA\rclone\rclone.conf"
-   ```
-   (на Linux/macOS: `cat ~/.config/rclone/rclone.conf`)
+## В GitHub Actions
 
-   Один блок `[gdrive] … token = {…}`, ничего не редактируй, просто
-   вставь как есть.
+В workflow `harvest.yml` rclone настраивается через секрет `RCLONE_CONFIG`:
 
-2. (Опционально) Создать переменные `GDRIVE_REMOTE` / `GDRIVE_BASE`
-   в Settings → Variables, если используешь не дефолтные имена.
+1. Локально: `cat ~/.config/rclone/rclone.conf` (или `%APPDATA%\rclone\rclone.conf`)
+2. Скопировать содержимое в секрет `RCLONE_CONFIG` (Settings → Secrets → Actions)
+3. Установить секрет `GDRIVE_BASE` (например `big-data`)
 
-3. Запустить workflow вручную: Actions → harvest → Run workflow.
+Workflow автоматически:
+1. Создаёт `rclone.conf` из секрета
+2. Скачивает `state.json` перед harvest
+3. Загружает новые файлы после harvest
 
-CI-runner поднимет rclone, положит конфиг из секрета, прогонит парсер,
-зальёт в Drive. State.json между прогонами автоматически подтягивается
-из Drive в начале каждого прогона.
+---
 
-## Если что-то идёт не так
+## Проверка
 
-- **`rclone не найден в PATH`** — установи rclone (см. шаг 1) и
-  перезапусти терминал/IDE.
-- **`state.json в Drive ещё нет — стартуем с нуля`** — нормально для
-  первого запуска, на следующей итерации будет уже не nuля.
-- **`Failed to copy: googleapi: Error 403`** — Google revoke OAuth
-  токен (бывает раз в полгода-год). Запусти `rclone config reconnect
-  gdrive:` или повтори `rclone config` с тем же именем.
-- **В Drive файлов меньше, чем спарсилось** — проверь `harvester/logs/run_*.json`
-  → `steps.gdrive_push.return_code`. Не 0 — посмотри в стандартном
-  выводе ошибку rclone.
-- **`gdrive` remote не виден в Actions** — проверь что секрет
-  `RCLONE_CONFIG` действительно содержит блок `[gdrive]`. Часто секрет
-  вставляется без `[gdrive]` строки сверху.
+```bash
+# Что лежит в Drive:
+rclone ls gdrive:big-data/ | head -20
 
-## Секрет в Devin / Cognition
+# Сколько файлов:
+rclone size gdrive:big-data/pdf/
 
-В сессиях Devin удобно сохранить `RCLONE_CONFIG` как **org-level**
-секрет (один раз) — тогда любая будущая сессия с этим репо
-автоматически получит его в env. См. [Devin secrets](https://docs.devin.ai/).
+# Скачать всё локально (для отладки):
+rclone sync gdrive:big-data/ ./drive_backup/ --progress
+```
+
+---
+
+## Альтернатива: S3
+
+Если предпочитаете S3-совместимое хранилище (Sber Cloud OBS, Yandex Object Storage, MinIO):
+
+```env
+S3_ENDPOINT_URL=https://obs.ru-moscow-1.hc.sbercloud.ru
+S3_BUCKET=my-bucket
+S3_ACCESS_KEY=your_access_key
+S3_SECRET_KEY=your_secret_key
+S3_REGION=ru-moscow-1
+S3_PREFIX=big-data/
+```
+
+```bash
+python -m harvester.s3_upload
+```
+
+См. также [ORACLE_CLOUD.md](ORACLE_CLOUD.md) для настройки Oracle Object Storage.
