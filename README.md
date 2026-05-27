@@ -61,16 +61,16 @@ RAG-система (Retrieval-Augmented Generation) для семантичес�
 ```
 .
 ├── core/                       # Бизнес-логика
-│   ├── cases.py                # Тематические кейсы + авто-теггинг
-│   ├── hybrid_search.py        # Dense + BM25 с RRF-fusion
+│   ├── cases.py                # 15 тематических кейсов (keyword matching)
+│   ├── hybrid_search.py        # Dense + BM25 с RRF-fusion (lazy init, thread-safe)
 │   ├── notebooks.py            # Пользовательские тетради (загрузка, индексация, поиск)
-│   ├── reranker.py             # Cross-encoder reranker
+│   ├── reranker.py             # Cross-encoder reranker (env RERANKER_MODEL)
 │   ├── study_tools.py          # Конспекты, карточки, квизы, графы, экспорт
-│   ├── taxonomy.py             # Таксономия доменов (химия + IT + пересечение)
+│   ├── taxonomy.py             # Таксономия: 3 домена, ~20 субдоменов
 │   ├── визуальная_обработка.py # OCR страниц PDF (Tier 0/1/2)
 │   ├── извлечение_картинок.py  # Извлечение и фильтрация изображений из PDF
-│   ├── классификатор.py        # Эмбеддинговый классификатор домен/субдомен
-│   └── фильтр_качества.py     # Фильтр низкокачественных PDF
+│   ├── классификатор.py        # Эмбеддинговый классификатор + scope-guard
+│   └── фильтр_качества.py     # Фильтр низкокачественных PDF (3 критерия)
 │
 ├── pipeline/                   # Пайплайн данных
 │   ├── ingest_v2.py            # PDF/DOCX/TXT → chunks_v2.jsonl (с метаданными)
@@ -85,7 +85,8 @@ RAG-система (Retrieval-Augmented Generation) для семантичес�
 ├── scripts/                    # Утилиты и скрипты запуска
 │   ├── запуск.py               # Streamlit + SSH-туннель + QR
 │   ├── download_snapshot.py    # Скачать snapshot из Qdrant Cloud
-│   ├── import_snapshot.py      # Импорт JSONL в локальный Qdrant
+│   ├── import_snapshot.py      # Импорт JSONL в локальный Qdrant (--recreate, --limit N)
+│   ├── optimize_collections.py # On_disk + binary quantization для экономии RAM
 │   ├── inspect_page.py         # Диагностика: что Qdrant знает про страницу
 │   ├── run_harvester.bat/.sh   # Однократный запуск харвестера
 │   └── run_harvester_loop.bat/.sh  # Бесконечный цикл харвестера
@@ -108,15 +109,16 @@ RAG-система (Retrieval-Augmented Generation) для семантичес�
 ├── .github/workflows/          # CI: harvest, embed-now, vectorize-existing, verify-qdrant
 ├── документация/               # Подробная документация по подсистемам
 │
-├── chunks_v2.jsonl             # Чанки с метаданными (основной файл данных)
-├── all_pdfs/                   # Сырые документы (не в git)
-├── harvested_meta/             # Метаданные собранных документов (JSON)
-├── extracted_images/           # Извлечённые изображения из PDF
-├── qdrant_storage/             # Локальное хранилище Qdrant
-├── requirements.txt            # Python-зависимости
-├── conftest.py                 # Pytest: настройка sys.path
-├── sitecustomize.py            # Автонастройка путей при запуске Python
-└── запуск.py                   # Шорткат → scripts/запуск.py
+├── chunks_v2.jsonl               # Чанки с метаданными (основной файл данных)
+├── knowledge_hybrid_export.jsonl # Готовые векторы из Qdrant Cloud (~6 GB)
+├── all_pdfs/                     # Сырые документы (не в git)
+├── harvested_meta/               # Метаданные собранных документов (JSON)
+├── extracted_images/             # Извлечённые изображения из PDF
+├── qdrant_db/                    # Локальное хранилище Qdrant (embedded mode)
+├── requirements.txt              # Python-зависимости
+├── conftest.py                   # Pytest: настройка sys.path + gасим TF
+├── sitecustomize.py              # Автонастройка путей + gасим TF при старте Python
+└── запуск.py                     # Шорткат → scripts/запуск.py
 ```
 
 ---
@@ -165,8 +167,12 @@ python pipeline/embed_resume_v2.py  # → Qdrant (локальный)
 ```bash
 # В .env добавить QDRANT_URL и QDRANT_API_KEY
 python scripts/download_snapshot.py --mode jsonl
-python scripts/import_snapshot.py
+python scripts/import_snapshot.py                    # все векторы
+python scripts/import_snapshot.py --limit 40000      # только 40k (если RAM мало)
+python scripts/import_snapshot.py --recreate --limit 40000  # снести и залить 40k
 ```
+
+Векторы не пересчитываются — берутся готовые из JSONL. Идемпотентный: повторный запуск пропускает уже загруженные точки.
 
 ### 4. Запуск
 
@@ -219,7 +225,7 @@ python pipeline/ingest_v2.py --full    # перезаписать chunks_v2.json
 python pipeline/embed_resume_v2.py
 ```
 
-Поддерживает как локальный Qdrant (`qdrant_storage/`), так и удалённый (через `QDRANT_URL` + `QDRANT_API_KEY`).
+Поддерживает как локальный Qdrant (`qdrant_db/`), так и удалённый (через `QDRANT_URL` + `QDRANT_API_KEY`).
 
 ---
 

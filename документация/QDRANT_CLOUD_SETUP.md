@@ -88,10 +88,17 @@ python scripts/download_snapshot.py --mode jsonl
 ### Импортировать JSONL в локальный Qdrant
 
 ```bash
+# Все векторы:
 python scripts/import_snapshot.py
+
+# С ограничением (если RAM мало):
+python scripts/import_snapshot.py --limit 40000
+
+# Снести старую базу и залить заново:
+python scripts/import_snapshot.py --recreate --limit 40000
 ```
 
-Импортирует `knowledge_hybrid_export.jsonl` в локальный `qdrant_storage/`. Векторы не пересчитываются — берутся готовые из JSONL. Идемпотентный (повторный запуск пропускает существующие точки).
+Импортирует `knowledge_hybrid_export.jsonl` в локальный `qdrant_db/`. Векторы не пересчитываются — берутся готовые из JSONL. Идемпотентный (повторный запуск пропускает существующие точки по id).
 
 ---
 
@@ -138,7 +145,7 @@ Binary quantization критична для Free Tier: без неё 768-мер�
 
 | Переменные | Режим |
 |-----------|-------|
-| `QDRANT_URL` не задан | Локальный (`qdrant_storage/`) |
+| `QDRANT_URL` не задан | Локальный (`qdrant_db/`) |
 | `QDRANT_URL` задан | Удалённый (Cloud) |
 
 Приложение автоматически выбирает режим при старте.

@@ -142,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Удалить локальную коллекцию и залить заново")
     парсер.add_argument("--batch", type=int, default=БАТЧ,
                         help=f"Размер батча upsert (default {БАТЧ})")
+    парсер.add_argument("--limit", type=int, default=0,
+                        help="Максимум точек для загрузки (0 = все)")
     args = парсер.parse_args(argv)
 
     путь_jsonl = Path(args.input)
@@ -211,8 +213,11 @@ def main(argv: list[str] | None = None) -> int:
                     осталось = с_строк - i
                     eta = осталось / max(скорость, 1)
                     print(f"  Загружено: {загружено}/{с_строк - len(уже_есть)} "
-                          f"({скорость:.0f} pt/s, ETA {eta / 60:.1f} мин)",
+                          f"({скорость:.0f} pt/s, ETA {eta / 60:.1f} мин",
                           flush=True)
+            if args.limit and загружено >= args.limit:
+                print(f"Достигнут лимит {args.limit}, останавливаюсь.")
+                break
     _flush()
 
     финал = клиент.count(КОЛЛЕКЦИЯ, exact=True).count
