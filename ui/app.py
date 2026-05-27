@@ -98,24 +98,28 @@ def загрузить_модель():
     return м
 
 
+def _текущий_путь_qdrant():
+    путь = st.session_state.get("qdrant_local_path") or os.getenv("QDRANT_LOCAL_PATH", "").strip()
+    if путь:
+        return str(Path(путь).expanduser().resolve())
+    return str(APP_DIR / "qdrant_db")
+
+
 @st.cache_resource
-def загрузить_qdrant():
-    """Удалённый Qdrant если задан QDRANT_URL, иначе локальный qdrant_db/."""
+def _загрузить_qdrant_cached(url: str, api_key: str | None, путь_локальной_базы: str):
     _s = _time.time()
     print(f"[mem] загрузить_qdrant: старт, RSS={_rss_mb():.0f} MB", flush=True)
-    url = os.getenv("QDRANT_URL", "").strip()
     if url:
         print(f"[mem] загрузить_qdrant: подключаюсь к Cloud {url[:50]}...", flush=True)
         кл = QdrantClient(
             url=url,
-            api_key=os.getenv("QDRANT_API_KEY") or None,
+            api_key=api_key,
             prefer_grpc=False,
             timeout=60,
         )
         print(f"[mem] загрузить_qdrant: Cloud готов за {_time.time()-_s:.1f}с, RSS={_rss_mb():.0f} MB", flush=True)
         return кл
-    # qdrant_db/ лежит в корне репо, а app.py теперь в ui/ — поднимаемся на уровень.
-    папка = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "qdrant_db")
+    папка = путь_локальной_базы
     print(f"[mem] загрузить_qdrant: открываю локальный {папка}", flush=True)
     кл = QdrantClient(path=папка)
     try:
@@ -134,7 +138,13 @@ def загрузить_qdrant():
     return кл
 
 
-@st.cache_resource
+def загрузить_qdrant():
+    """Удалённый Qdrant если задан QDRANT_URL, иначе выбранная локальная база."""
+    url = os.getenv("QDRANT_URL", "").strip()
+    api_key = os.getenv("QDRANT_API_KEY") or None
+    return _загрузить_qdrant_cached(url, api_key, _текущий_путь_qdrant())
+
+
 def выбрать_коллекцию():
     """Выбираем активную коллекцию: knowledge_hybrid (dense+sparse) >
     knowledge (только dense) > химия (старая, dense + старая схема payload).
@@ -160,6 +170,27 @@ def выбрать_коллекцию():
         return "knowledge", True, False
     print(f"[mem] выбрать_коллекцию: выбрана химия (старая) за {_time.time()-_s:.1f}с", flush=True)
     return "химия", False, False
+
+
+def _локальные_qdrant_базы():
+    """Список локальных баз без открытия Qdrant.
+
+    Это важно для тяжёлых коллекций: UI может предложить маленькие базы
+    `qdrant_ui/*`, не пытаясь сначала открыть полную `qdrant_db/`.
+    """
+    варианты = []
+    ui_root = APP_DIR / "qdrant_ui"
+    if ui_root.exists():
+        for path in sorted(ui_root.iterdir(), key=lambda p: (0, int(p.name)) if p.name.isdigit() else (1, p.name)):
+            if path.is_dir():
+                label = f"Быстрая база {path.name} фрагментов"
+                варианты.append((label, str(path.resolve())))
+    full = APP_DIR / "qdrant_db"
+    if full.exists():
+        варианты.append(("Полная локальная база", str(full.resolve())))
+    if not варианты:
+        варианты.append(("Локальная база по умолчанию", str(full.resolve())))
+    return варианты
 
 
 @st.cache_resource
@@ -647,11 +678,6 @@ def обогатить_картинками_соседних_страниц(фр
                     for img in индекс.get((fh, page + сторона), []):
                         путь = img.get("path") or ""
                         if not путь or путь in видели:
-                            continue
-                        # Берём соседей только с осмысленным caption —
-                        # иначе пользователь видит картинки без контекста
-                        caption = (img.get("caption") or "").strip()
-                        if not caption:
                             continue
                         видели.add(путь)
                         соседи.append(img)
@@ -2012,6 +2038,24 @@ with вкладка1:
         placeholder="Какие методы машинного обучения используются для предсказания растворимости молекул?",
         label_visibility="collapsed"
     )
+
+    if not os.getenv("QDRANT_URL", "").strip():
+        базы_qdrant = _локальные_qdrant_базы()
+        текущий_путь = st.session_state.get("qdrant_local_path") or базы_qdrant[0][1]
+        текущий_индекс = next(
+            (i for i, (_, path) in enumerate(базы_qdrant) if path == текущий_путь),
+            0,
+        )
+        выбранная_база = st.selectbox(
+            "База корпуса",
+            options=[path for _, path in базы_qdrant],
+            index=текущий_индекс,
+            format_func=lambda path: next(label for label, p in базы_qdrant if p == path),
+            help="Для тяжёлого корпуса выберите одну из быстрых qdrant_ui-баз, чтобы Streamlit не открывал полную локальную БД.",
+        )
+        st.session_state["qdrant_local_path"] = выбранная_база
+    else:
+        st.caption("Корпус подключён через Qdrant Cloud/сервер из QDRANT_URL.")
 
     _, новая_схема, _ = выбрать_коллекцию()
 

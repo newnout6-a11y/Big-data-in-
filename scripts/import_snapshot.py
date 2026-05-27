@@ -189,6 +189,9 @@ def main(argv: list[str] | None = None) -> int:
 
     with путь_jsonl.open("r", encoding="utf-8") as f:
         for i, строка in enumerate(f, 1):
+            if args.limit and (загружено + len(батч_точек)) >= args.limit:
+                print(f"Достигнут лимит {args.limit}, останавливаюсь.")
+                break
             строка = строка.strip()
             if not строка:
                 continue
@@ -213,11 +216,8 @@ def main(argv: list[str] | None = None) -> int:
                     осталось = с_строк - i
                     eta = осталось / max(скорость, 1)
                     print(f"  Загружено: {загружено}/{с_строк - len(уже_есть)} "
-                          f"({скорость:.0f} pt/s, ETA {eta / 60:.1f} мин",
+                          f"({скорость:.0f} pt/s, ETA {eta / 60:.1f} мин)",
                           flush=True)
-            if args.limit and загружено >= args.limit:
-                print(f"Достигнут лимит {args.limit}, останавливаюсь.")
-                break
     _flush()
 
     финал = клиент.count(КОЛЛЕКЦИЯ, exact=True).count

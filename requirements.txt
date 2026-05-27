@@ -1,6 +1,7 @@
 streamlit
 sentence-transformers
 qdrant-client
+protobuf>=3.20.3,<5
 pypdf
 pymupdf
 fastembed

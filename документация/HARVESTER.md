@@ -201,12 +201,22 @@ concurrency:
 
 ## Использование
 
+### CLI-параметры `harvester.run`
+
+| Параметр | Тип | Default | Описание |
+|----------|-----|---------|----------|
+| `--budget` | int | 300 | Сколько документов пытаться скачать (≈/N на источник) |
+| `--year-min` | int | 2020 | Минимальный год публикации |
+| `--email` | str | env `HARVESTER_EMAIL` | Email для User-Agent (нужен OpenAlex, Unpaywall) |
+| `--sources` | str | все 8 | Список через запятую |
+| `--time-limit-min` | int | 0 (без лимита) | Hard deadline в минутах |
+
 ### Однократный сбор
 
 ```bash
 python -m harvester.run --budget 500
 python -m harvester.run --budget 200 --sources arxiv,openalex
-python -m harvester.run --budget 100 --year-min 2022
+python -m harvester.run --budget 100 --year-min 2022 --time-limit-min 30
 ```
 
 ### End-to-end (harvest + ingest + embed)
@@ -322,3 +332,40 @@ python -m harvester.s3_upload
    - Запись в `СБОРЩИКИ`
 5. Добавить имя в `ВСЕ_ИСТОЧНИКИ`
 6. (Опционально) Добавить ожидаемый домен в `домены.ИСТОЧНИК_ОЖИДАЕМЫЙ_ДОМЕН`
+
+---
+
+## Именование файлов
+
+Скачанные файлы получают читаемое и уникальное имя:
+
+```
+<slug-из-заголовка>__<short-doc-id>.pdf
+```
+
+Примеры:
+- `graph-neural-networks-for-molecular__arxiv-2301-12345.pdf`
+- `bayesian-optimization-of-chemical__doi-10-1038-s41586.pdf`
+
+Правила:
+- Кириллица → транслит (`молекул` → `molekul`)
+- Спецсимволы → `-`
+- Максимум 80 символов slug
+- Если заголовок пустой → fallback на short-hash doc_id (12 символов SHA-1)
+
+---
+
+## Атомарность state.json
+
+Запись state — через atomic rename:
+```python
+# 1. Пишем во временный файл
+with open("state.json.tmp", "w") as f:
+    json.dump(данные, f)
+# 2. Атомарная замена
+os.replace("state.json.tmp", "state.json")
+```
+
+Это предотвращает повреждение state при kill процесса mid-write (частая ситуация в GitHub Actions при `timeout-minutes`).
+
+Runtime-индексы (`_downloaded_set`, `_normalized_set`) — O(1) lookup, не сериализуются в JSON. Восстанавливаются из списков при каждом `прочитать()`.

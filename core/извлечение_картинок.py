@@ -233,7 +233,7 @@ def картинка_декоративная(pix: Any) -> bool:
         высота = int(pix.height)
     except Exception:
         return False
-    if ширина < 80 or высота < 80:
+    if ширина < 40 or высота < 40:
         return True
     # Узкая горизонтальная или вертикальная полоска
     стороны = sorted((ширина, высота))

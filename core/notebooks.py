@@ -25,10 +25,33 @@ from qdrant_client.models import (
 import визуальная_обработка as виз
 import извлечение_картинок as извк
 
+_получить_easyocr_reader = извк._получить_easyocr_reader
+
 try:
     import fitz
 except ImportError:  # pragma: no cover - optional fallback
     fitz = None
+
+
+def _ocr_картинки(путь_файла: Path) -> str:
+    reader = _получить_easyocr_reader()
+    if reader is None:
+        return ""
+    try:
+        import cv2
+        import numpy as np
+        данные = np.fromfile(str(путь_файла), dtype=np.uint8)
+        if данные.size == 0:
+            return ""
+        изображение = cv2.imdecode(данные, cv2.IMREAD_COLOR)
+        if изображение is None:
+            return ""
+        результаты = reader.readtext(изображение, detail=0, paragraph=True)
+    except Exception:
+        return ""
+    куски = [s.strip() for s in (результаты or []) if s and isinstance(s, str) and s.strip()]
+    текст = re.sub(r"\s+", " ", " ".join(куски)).strip()
+    return текст[:397].rstrip() + "…" if len(текст) > 400 else текст
 
 # easyocr — опциональная зависимость для распознавания текста на растровых
 # схемах. Если не установлена — OCR-функционал просто отключается, всё
