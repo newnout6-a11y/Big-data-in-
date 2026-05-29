@@ -58,7 +58,10 @@ def parse_json_loose(raw: str) -> dict[str, Any]:
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:
-        data = json.loads(text[start:end + 1])
+        try:
+            data = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as error:
+            raise ValueError("LLM вернула невалидный JSON.") from error
         return data if isinstance(data, dict) else {"items": data}
     raise ValueError("LLM вернула невалидный JSON.")
 

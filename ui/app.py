@@ -2916,12 +2916,15 @@ with вкладка3:
                     _connected = [_id2label.get(_c, _c) for _c in _adj.get(_nid, [])]
                     _deg = _degree.get(_nid, 0)
                     _card_class = "mind-card is-hub" if _deg > 2 else "mind-card"
+                    # _nlabel, _l (метки связей) и _t (тезисы) приходят из JSON-ответа
+                    # LLM и рендерятся ниже через unsafe_allow_html=True. Экранируем,
+                    # иначе спецсимволы/HTML из ответа модели ломают вёрстку (или хуже).
                     _conn_html = "".join(
-                        f"<span class='mind-chip'>{_l}</span>"
+                        f"<span class='mind-chip'>{html.escape(str(_l))}</span>"
                         for _l in _connected
                     )
                     _li_html = "".join(
-                        f"<li style='margin-bottom:5px;line-height:1.55;color:#a3a3a3'>{_t}</li>"
+                        f"<li style='margin-bottom:5px;line-height:1.55;color:#a3a3a3'>{html.escape(str(_t))}</li>"
                         for _t in _theses
                     ) if _theses else "<li style='color:#525252;font-style:italic'>тезисы не извлечены</li>"
                     _degree_badge = (
@@ -2937,7 +2940,7 @@ with вкладка3:
                     _card = (
                         f"<div class='{_card_class}'>"
                         f"<div style='font-weight:600;font-size:0.95rem;color:#f0f0f0;margin-bottom:0.55rem'>"
-                        f"{_nlabel}"
+                        f"{html.escape(_nlabel)}"
                         f"{_degree_badge}"
                         f"</div>"
                         f"{_connections_block}"
