@@ -640,6 +640,48 @@ LLM_МОДЕЛИ = {
 }
 
 
+# Жёсткие потолки output API по провайдеру (документация на ноябрь 2025).
+# Groq всех LLaMA-моделей режет на 8 192 токена. DeepSeek V4 Flash/Pro по
+# документации поддерживает до 384 000, но это превращает один запрос в
+# роман на 600+ страниц и ~25 минут генерации — для UX плохо. Ставим
+# консервативный потолок 32 000 (~24 000 слов = повесть), а кому реально
+# нужно больше — задаёт env LLM_MAX_TOKENS_DEEPSEEK.
+_LLM_ПОТОЛКИ = {
+    "groq": int(os.getenv("LLM_MAX_TOKENS_GROQ", "8000")),
+    "deepseek": int(os.getenv("LLM_MAX_TOKENS_DEEPSEEK", "32000")),
+}
+# Жёсткие технические лимиты API — выше них ставить нельзя, провайдер
+# просто отрежет ответ или вернёт ошибку.
+_LLM_ABS_МАКС = {"groq": 8192, "deepseek": 384000}
+
+
+def _max_tokens(llm_id: str | None, *, режим: str = "default") -> int:
+    """Возвращает безопасный max_tokens для модели.
+
+    режим:
+      'default'  — основной RAG-ответ (потолок провайдера, ужат до его cap).
+      'deep'     — второй проход углублённого режима (то же что default;
+                   при необходимости можно умножить).
+      'quiz'     — короткие учебные ответы (~2 000 максимум).
+      'translate'— перевод (~1 000).
+      'formula'  — извлечение формул JSON (~1 000).
+    """
+    данные = LLM_МОДЕЛИ.get(llm_id or "") or {}
+    провайдер = данные.get("provider", "groq")
+    cap = min(_LLM_ПОТОЛКИ.get(провайдер, 4000), _LLM_ABS_МАКС.get(провайдер, 8192))
+    if режим == "default":
+        return cap
+    if режим == "deep":
+        return cap
+    if режим == "quiz":
+        return min(cap, 2200)
+    if режим == "translate":
+        return min(cap, 1200)
+    if режим == "formula":
+        return min(cap, 1000)
+    return cap
+
+
 def _llm_доступна(llm_id):
     данные = LLM_МОДЕЛИ.get(llm_id) or {}
     provider = данные.get("provider")
@@ -823,10 +865,10 @@ def получить_ответ_от_groq(вопрос, фрагменты, *, l
             {"role": "user", "content": f"CONTEXT:\n{контекст}\n\nQUESTION:\n{вопрос}"}
         ],
         "temperature": 0.1,
-        # 1500 tokens хватало на короткий ответ. Сейчас правило 14 требует
-        # связного ответа из 3-4 разделов с разных документов — увеличиваем
-        # бюджет, иначе модель режет ответ на полуслове.
-        "max_tokens": 2400,
+        # Лимит вычисляется по провайдеру: Groq cap 8000, DeepSeek 32000
+        # дефолт (override через LLM_MAX_TOKENS_DEEPSEEK env). Раньше было
+        # хардкодом 1500, что резало развёрнутые ответы DeepSeek на полуслове.
+        "max_tokens": _max_tokens(llm_id, режим="default"),
     }, llm_id=llm_id)
     текст = ответ.choices[0].message.content
     текст = отрезать_источники(текст)
@@ -927,7 +969,10 @@ def получить_углублённый_ответ(вопрос, фрагм�
                 {"role": "user", "content": user_msg},
             ],
             "temperature": 0.15,
-            "max_tokens": 3000,
+            # Второй проход: тот же провайдер-cap. Если перешли с Groq на
+            # DeepSeek (cross-validation) — автоматически получим больший
+            # бюджет, и наоборот.
+            "max_tokens": _max_tokens(второй_id, режим="deep"),
         }, llm_id=второй_id)
     except Exception as e:
         # Если второй проход упал — возвращаем черновик, не теряем UX.
@@ -2233,10 +2278,12 @@ def учебные_фрагменты(тетрадь, документ, тема
     )
 
 
-def учебный_текстовый_ответ(задача, фрагменты, max_tokens=1800):
+def учебный_текстовый_ответ(задача, фрагменты, max_tokens=None):
     if not _ключи_groq():
         return "Ошибка: GROQ_API_KEY не задан в файле .env"
     контекст = study_tools.fragments_context(фрагменты)
+    # Конспекты любят объём — берём cap Groq (8000) если не указано иное.
+    лимит = max_tokens if max_tokens else _max_tokens("groq:llama-3.3-70b-versatile", режим="default")
     ответ = вызвать_groq({
         "model": "llama-3.3-70b-versatile",
         "messages": [
@@ -2249,16 +2296,19 @@ def учебный_текстовый_ответ(задача, фрагмент�
             {"role": "user", "content": f"CONTEXT:\n{контекст}\n\nTASK:\n{задача}"}
         ],
         "temperature": 0.1,
-        "max_tokens": max_tokens,
+        "max_tokens": лимит,
     })
     текст = отрезать_источники(ответ.choices[0].message.content)
     return убрать_неверные_маркеры(текст, фрагменты)
 
 
-def учебный_json_ответ(задача, фрагменты, max_tokens=1800):
+def учебный_json_ответ(задача, фрагменты, max_tokens=None):
     if not _ключи_groq():
         raise RuntimeError("GROQ_API_KEY не задан в файле .env")
     контекст = study_tools.fragments_context(фрагменты)
+    # JSON-карточки/квизы — поднимаем дефолт до полного cap Groq, иначе
+    # 30-карточный набор не помещается и ломается в середине JSON.
+    лимит = max_tokens if max_tokens else _max_tokens("groq:llama-3.3-70b-versatile", режим="quiz")
     ответ = вызвать_groq({
         "model": "llama-3.3-70b-versatile",
         "response_format": {"type": "json_object"},
@@ -2271,7 +2321,7 @@ def учебный_json_ответ(задача, фрагменты, max_tokens=
             {"role": "user", "content": f"CONTEXT:\n{контекст}\n\nTASK:\n{задача}"}
         ],
         "temperature": 0.1,
-        "max_tokens": max_tokens,
+        "max_tokens": лимит,
     })
     return study_tools.parse_json_loose(ответ.choices[0].message.content)
 

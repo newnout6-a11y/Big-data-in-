@@ -241,3 +241,56 @@ def test_C16_smiles_маркер_парсится_корректно():
     assert len(маркеры) == 2
     assert маркеры[0].group(1) == "0"
     assert маркеры[1].group(1) == "1"
+
+
+# ---------- C17: провайдер-зависимый max_tokens ----------
+
+def test_C17_max_tokens_groq_не_превышает_cap():
+    """Groq llama-моделей API режет на 8192. Не должны превышать."""
+    sys.modules.pop("app", None)
+    import app
+    лимит = app._max_tokens("groq:llama-3.3-70b-versatile", режим="default")
+    assert лимит <= 8192, f"Groq cap превышен: {лимит}"
+    assert лимит >= 4000, f"Groq лимит подозрительно мал: {лимит}"
+
+
+def test_C17_max_tokens_deepseek_больше_groq():
+    """DeepSeek поддерживает гораздо больше токенов — лимит должен быть выше."""
+    sys.modules.pop("app", None)
+    import app
+    groq = app._max_tokens("groq:llama-3.3-70b-versatile", режим="default")
+    ds = app._max_tokens("deepseek:deepseek-v4-flash", режим="default")
+    assert ds > groq, (
+        f"DeepSeek лимит ({ds}) должен быть больше Groq ({groq}) — иначе "
+        "пользователь не увидит реальной разницы при выборе провайдера"
+    )
+    # Sanity: дефолт 32 000 — это уже сильно больше старых 1500
+    assert ds >= 16000, f"DeepSeek default слишком мал: {ds}"
+
+
+def test_C17_max_tokens_env_override(monkeypatch):
+    """LLM_MAX_TOKENS_DEEPSEEK должен переопределять дефолт."""
+    monkeypatch.setenv("LLM_MAX_TOKENS_DEEPSEEK", "100000")
+    sys.modules.pop("app", None)
+    import app
+    лимит = app._max_tokens("deepseek:deepseek-v4-flash", режим="default")
+    assert лимит == 100000
+
+
+def test_C17_max_tokens_не_превышает_абсолютный_cap(monkeypatch):
+    """Даже если в env положили космос — итоговый max_tokens обрезается
+    до жёсткого технического cap провайдера, иначе API вернёт ошибку."""
+    monkeypatch.setenv("LLM_MAX_TOKENS_DEEPSEEK", "999999999")
+    sys.modules.pop("app", None)
+    import app
+    лимит = app._max_tokens("deepseek:deepseek-v4-flash", режим="default")
+    # DeepSeek API максимум 384 000 — выше нельзя
+    assert лимит <= 384000
+
+
+def test_C17_max_tokens_неизвестная_модель_безопасный_default():
+    sys.modules.pop("app", None)
+    import app
+    лимит = app._max_tokens("unknown:foo", режим="default")
+    # Должен вернуть число, не упасть
+    assert isinstance(лимит, int) and лимит > 0
