@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 
 
@@ -116,7 +117,10 @@ def отбраковать(путь_оригинал: str, папка_для_о�
                 if not os.path.exists(кандидат):
                     новый = кандидат
                     break
-        os.rename(путь_оригинал, новый)
+        # shutil.move, а не os.rename: rejected_pdfs/ может быть на другой
+        # файловой системе (например, отдельный том в Docker/CI), где
+        # os.rename падает с EXDEV (cross-device link).
+        shutil.move(путь_оригинал, новый)
         # Запишем причину
         with open(новый + ".reason.txt", "w", encoding="utf-8") as f:
             f.write(причина + "\n")
