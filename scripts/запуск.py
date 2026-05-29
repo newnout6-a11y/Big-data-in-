@@ -368,48 +368,51 @@ def сгенерировать_qr(url):
 def обновить_qr_страницу(url, провайдер, статус="ok"):
     """Перегенерирует qr.png и пишет qr.html с актуальным URL и QR.
 
-    Страница обновляется сама через `<meta http-equiv="refresh" content="5">`,
-    поэтому открытое окно браузера сразу подхватит новый URL после
-    watchdog-рестарта. QR.png подгружается с querystring `?t=<timestamp>`,
-    чтобы кэш браузера не показывал старую картинку.
+    HTML внутри держит JavaScript-цикл: каждые 5 сек делает no-cors fetch
+    к публичному URL (HEAD/GET) — нам важно только что network-уровень
+    отдал ответ. Если 2 проверки подряд провалились, статус сразу
+    переключается на красный «○ нет соединения, восстанавливаем…».
+
+    Это ловит ситуацию когда туннель упал, а python-watchdog ещё не успел
+    среагировать (HEALTH_INTERVAL=15 сек). Раньше плашка «● онлайн»
+    оставалась показывать ложный статус несколько секунд.
+
+    Параллельно страница каждые 5 сек читает qr_status.txt — если python
+    обновил state (новый URL после рестарта или статус 'down'), страница
+    подтягивает изменения без перезагрузки.
+
+    QR.png пересохраняется при смене URL с cache-bust query `?t=<timestamp>`.
     """
     if url:
         сгенерировать_qr(url)
-    bust = int(time.time())  # cache buster для qr.png
-    статус_текст = {
-        "ok": "● онлайн",
-        "starting": "◐ запуск…",
-        "down": "○ восстанавливается…",
-    }.get(статус, статус)
-    статус_цвет = {
-        "ok": "#22c55e",
-        "starting": "#eab308",
-        "down": "#ef4444",
-    }.get(статус, "#888")
+    bust = int(time.time())
     qr_блок = (
-        f'<img src="qr.png?t={bust}" alt="QR" '
+        f'<img id="qr-img" src="qr.png?t={bust}" alt="QR" '
         'style="width:340px;height:340px;background:#fff;padding:18px;'
         'border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.25)" />'
         if url else
-        '<div style="width:340px;height:340px;border:2px dashed #555;'
+        '<div id="qr-img" style="width:340px;height:340px;border:2px dashed #555;'
         'border-radius:14px;display:flex;align-items:center;justify-content:center;'
         'color:#888;font-family:system-ui,sans-serif">QR пока не готов</div>'
     )
-    url_блок = (
+    url_html = (
         f'<a href="{url}" target="_blank" style="color:#60a5fa;'
-        'text-decoration:none;word-break:break-all">{url}</a>'.replace("{url}", url)
+        f'text-decoration:none;word-break:break-all">{url}</a>'
         if url else
         '<span style="color:#888">URL появится при подключении туннеля</span>'
     )
-    провайдер_блок = (
+    провайдер_html = (
         f'через <b>{провайдер}</b>' if провайдер else 'провайдер: …'
     )
+
+    стартовый_статус = статус
+    серверный_url = url or ""
+
     html_страница = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <title>Навигатор · публичный доступ</title>
-<meta http-equiv="refresh" content="5">
 <style>
   body {{
     margin: 0; padding: 0;
@@ -431,10 +434,13 @@ def обновить_qr_страницу(url, провайдер, статус="
     font-size: 0.85rem;
     letter-spacing: 0.2em;
     text-transform: uppercase;
-    color: {статус_цвет};
     margin-bottom: 12px;
     font-weight: 600;
+    transition: color 0.3s ease;
   }}
+  .status.ok      {{ color: #22c55e; }}
+  .status.starting{{ color: #eab308; }}
+  .status.down    {{ color: #ef4444; }}
   h1 {{
     font-size: 1.5rem;
     margin: 0 0 4px 0;
@@ -456,20 +462,130 @@ def обновить_qr_страницу(url, провайдер, статус="
     color: #525252;
     font-size: 0.78rem;
   }}
+  /* Когда живой статус "down" — затемняем QR, чтобы пользователь видел что
+     сейчас сканировать бесполезно. */
+  body.is-down #qr-img {{ opacity: 0.35; filter: grayscale(0.5); }}
 </style>
 </head>
-<body>
+<body class="is-{стартовый_статус}">
   <div class="card">
-    <div class="status">{статус_текст}</div>
+    <div id="status" class="status {стартовый_статус}">…</div>
     <h1>Навигатор цифровой химии</h1>
-    <div class="sub">{провайдер_блок}</div>
+    <div class="sub" id="provider">{провайдер_html}</div>
     {qr_блок}
-    <div class="url">{url_блок}</div>
-    <div class="hint">
-      Эта страница обновляется автоматически каждые 5 сек.<br>
-      Если URL сменится — QR обновится сам.
+    <div class="url" id="url-block">{url_html}</div>
+    <div class="hint" id="hint">
+      Статус обновляется автоматически каждые 5 сек.
     </div>
   </div>
+
+<script>
+(function() {{
+  let TUNNEL_URL = {repr(серверный_url)};
+  let LAST_PYTHON_BUST = {bust};
+  let CONSECUTIVE_FAILS = 0;
+  const SOFT_FAIL_THRESHOLD = 2;
+  const STATUS_FILE = "qr_status.txt";
+  const QR_FILE = "qr.png";
+
+  const elStatus   = document.getElementById('status');
+  const elProvider = document.getElementById('provider');
+  const elUrl      = document.getElementById('url-block');
+  const elQr       = document.getElementById('qr-img');
+  const elBody     = document.body;
+
+  function setStatus(name, text) {{
+    elStatus.className = 'status ' + name;
+    elStatus.textContent = text;
+    elBody.className = 'is-' + name;
+  }}
+
+  async function pingTunnel(url) {{
+    if (!url) return false;
+    try {{
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 6000);
+      await fetch(url.replace(/\\/$/, '') + '/_stcore/health',
+                  {{mode: 'no-cors', signal: ctrl.signal, cache: 'no-store'}});
+      clearTimeout(timer);
+      return true;
+    }} catch (e) {{
+      return false;
+    }}
+  }}
+
+  async function pullPythonStatus() {{
+    try {{
+      const r = await fetch(STATUS_FILE + '?t=' + Date.now(),
+                            {{cache: 'no-store'}});
+      if (!r.ok) return null;
+      const text = await r.text();
+      const lines = text.split(/\\r?\\n/);
+      return {{
+        url:       (lines[0] || '').trim(),
+        provider:  (lines[1] || '').trim(),
+        status:    (lines[2] || '').trim(),
+        bust:      parseInt(lines[3] || '0', 10),
+      }};
+    }} catch (e) {{
+      return null;
+    }}
+  }}
+
+  function applyPythonState(s) {{
+    if (!s) return;
+    if (s.url !== TUNNEL_URL) {{
+      TUNNEL_URL = s.url;
+      if (s.url) {{
+        elUrl.innerHTML = '<a href="' + s.url + '" target="_blank" '
+          + 'style="color:#60a5fa;text-decoration:none;word-break:break-all">'
+          + s.url + '</a>';
+      }} else {{
+        elUrl.innerHTML = '<span style="color:#888">URL появится при '
+          + 'подключении туннеля</span>';
+      }}
+    }}
+    if (s.bust && s.bust !== LAST_PYTHON_BUST && elQr && elQr.tagName === 'IMG') {{
+      elQr.src = QR_FILE + '?t=' + s.bust;
+      LAST_PYTHON_BUST = s.bust;
+    }}
+    if (s.provider && elProvider) {{
+      elProvider.innerHTML = 'через <b>' + s.provider + '</b>';
+    }}
+    if (s.status === 'down') {{
+      setStatus('down', '○ восстанавливается…');
+      CONSECUTIVE_FAILS = SOFT_FAIL_THRESHOLD;
+    }} else if (s.status === 'starting') {{
+      setStatus('starting', '◐ запуск…');
+    }}
+  }}
+
+  async function tick() {{
+    const py = await pullPythonStatus();
+    applyPythonState(py);
+
+    if (TUNNEL_URL) {{
+      const живой = await pingTunnel(TUNNEL_URL);
+      if (живой) {{
+        CONSECUTIVE_FAILS = 0;
+        setStatus('ok', '● онлайн');
+      }} else {{
+        CONSECUTIVE_FAILS++;
+        if (CONSECUTIVE_FAILS >= SOFT_FAIL_THRESHOLD) {{
+          setStatus('down', '○ нет соединения, восстанавливаем…');
+        }} else {{
+          setStatus('starting', '◐ проверяем соединение…');
+        }}
+      }}
+    }} else {{
+      setStatus('starting', '◐ запуск…');
+    }}
+  }}
+
+  tick();
+  setInterval(tick, 5000);
+}})();
+</script>
 </body>
 </html>
 """
