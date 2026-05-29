@@ -43,6 +43,8 @@ _tunnel*.log
 _streamlit*.log
 _codex_*.log
 qr.png
+qr.html
+qr_status.txt
 exports/
 
 # Личные файлы (скрины, эксперименты, заметки) — не часть проекта

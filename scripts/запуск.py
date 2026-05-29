@@ -358,6 +358,133 @@ def сгенерировать_qr(url):
     return ПУТЬ_QR
 
 
+# Локальная HTML-страница с актуальным QR. Открывается ОДИН раз в браузере,
+# а потом автообновляется через meta-refresh — пользователь не должен
+# перезапускать просмотрщик при смене URL после watchdog-рестарта.
+ПУТЬ_QR_HTML = os.path.join(КОРЕНЬ, "qr.html")
+ПУТЬ_QR_СТАТУС = os.path.join(КОРЕНЬ, "qr_status.txt")  # текущий URL в текстовом виде
+
+
+def обновить_qr_страницу(url, провайдер, статус="ok"):
+    """Перегенерирует qr.png и пишет qr.html с актуальным URL и QR.
+
+    Страница обновляется сама через `<meta http-equiv="refresh" content="5">`,
+    поэтому открытое окно браузера сразу подхватит новый URL после
+    watchdog-рестарта. QR.png подгружается с querystring `?t=<timestamp>`,
+    чтобы кэш браузера не показывал старую картинку.
+    """
+    if url:
+        сгенерировать_qr(url)
+    bust = int(time.time())  # cache buster для qr.png
+    статус_текст = {
+        "ok": "● онлайн",
+        "starting": "◐ запуск…",
+        "down": "○ восстанавливается…",
+    }.get(статус, статус)
+    статус_цвет = {
+        "ok": "#22c55e",
+        "starting": "#eab308",
+        "down": "#ef4444",
+    }.get(статус, "#888")
+    qr_блок = (
+        f'<img src="qr.png?t={bust}" alt="QR" '
+        'style="width:340px;height:340px;background:#fff;padding:18px;'
+        'border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.25)" />'
+        if url else
+        '<div style="width:340px;height:340px;border:2px dashed #555;'
+        'border-radius:14px;display:flex;align-items:center;justify-content:center;'
+        'color:#888;font-family:system-ui,sans-serif">QR пока не готов</div>'
+    )
+    url_блок = (
+        f'<a href="{url}" target="_blank" style="color:#60a5fa;'
+        'text-decoration:none;word-break:break-all">{url}</a>'.replace("{url}", url)
+        if url else
+        '<span style="color:#888">URL появится при подключении туннеля</span>'
+    )
+    провайдер_блок = (
+        f'через <b>{провайдер}</b>' if провайдер else 'провайдер: …'
+    )
+    html_страница = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Навигатор · публичный доступ</title>
+<meta http-equiv="refresh" content="5">
+<style>
+  body {{
+    margin: 0; padding: 0;
+    min-height: 100vh;
+    background: #0a0a0a;
+    color: #fafafa;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+  }}
+  .card {{
+    text-align: center;
+    padding: 48px 56px;
+    background: #111;
+    border-radius: 16px;
+    border: 1px solid #2a2a2a;
+    max-width: 460px;
+  }}
+  .status {{
+    font-size: 0.85rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: {статус_цвет};
+    margin-bottom: 12px;
+    font-weight: 600;
+  }}
+  h1 {{
+    font-size: 1.5rem;
+    margin: 0 0 4px 0;
+    letter-spacing: -0.02em;
+  }}
+  .sub {{
+    color: #a3a3a3;
+    margin-bottom: 28px;
+    font-size: 0.92rem;
+  }}
+  .url {{
+    margin-top: 28px;
+    font-size: 0.95rem;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    line-height: 1.55;
+  }}
+  .hint {{
+    margin-top: 18px;
+    color: #525252;
+    font-size: 0.78rem;
+  }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="status">{статус_текст}</div>
+    <h1>Навигатор цифровой химии</h1>
+    <div class="sub">{провайдер_блок}</div>
+    {qr_блок}
+    <div class="url">{url_блок}</div>
+    <div class="hint">
+      Эта страница обновляется автоматически каждые 5 сек.<br>
+      Если URL сменится — QR обновится сам.
+    </div>
+  </div>
+</body>
+</html>
+"""
+    try:
+        with open(ПУТЬ_QR_HTML, "w", encoding="utf-8") as f:
+            f.write(html_страница)
+    except OSError:
+        pass
+    try:
+        with open(ПУТЬ_QR_СТАТУС, "w", encoding="utf-8") as f:
+            f.write(f"{url or ''}\n{провайдер or ''}\n{статус}\n{bust}\n")
+    except OSError:
+        pass
+
+
 def открыть_файл(путь):
     if os.name == "nt":
         try:
@@ -433,9 +560,13 @@ def стартовый_цикл(состояние: Состояние) -> bool:
     состояние.url = url
     состояние.провайдер = имя
 
-    сгенерировать_qr(url)
+    обновить_qr_страницу(url, имя, статус="ok")
     if not состояние.qr_открыт_впервые:
-        открыть_файл(ПУТЬ_QR)
+        # Открываем именно qr.html (не qr.png) — у HTML есть meta-refresh
+        # каждые 5 сек, поэтому пользователь не должен переоткрывать после
+        # watchdog-рестарта со сменой URL. Старый qr.png тоже обновляется
+        # на диске, но просмотрщики Windows за ним не следят.
+        открыть_файл(ПУТЬ_QR_HTML)
         состояние.qr_открыт_впервые = True
 
     return True
@@ -499,6 +630,10 @@ def главный():
     состояние = Состояние()
     остановлен = [False]
 
+    # Заранее создаём HTML-заглушку, чтобы пользователь мог открыть страницу
+    # и видеть статус «запуск…» пока поднимается Streamlit.
+    обновить_qr_страницу("", "", статус="starting")
+
     def обработчик_сигнала(signum, frame):
         if not остановлен[0]:
             остановлен[0] = True
@@ -518,7 +653,8 @@ def главный():
             print(f"  Локально:    http://localhost:{ПОРТ}")
             print(f"  Публично:    {состояние.url}")
             print(f"  Провайдер:   {состояние.провайдер}")
-            print(f"  QR-код:      {ПУТЬ_QR}")
+            print(f"  QR-страница: {ПУТЬ_QR_HTML}")
+            print(f"  QR-картинка: {ПУТЬ_QR}")
             print(f"  Streamlit:   {ПУТЬ_STREAMLIT_ЛОГ}")
             print(f"  Туннель:     {ПУТЬ_ТУННЕЛЬ_ЛОГ}")
             print("─" * 64)
@@ -533,6 +669,9 @@ def главный():
                 break
             # Иначе fail — закрываемся и идём в backoff
         состояние.закрыть()
+        # Обновляем HTML-страницу: статус «восстанавливается». Пользователь,
+        # держащий вкладку открытой, увидит изменение через 5 сек (meta-refresh).
+        обновить_qr_страницу(состояние.url, состояние.провайдер, статус="down")
         пауза = состояние.backoff
         состояние.backoff = min(состояние.backoff * 2, RESTART_BACKOFF_МАКС)
         печать(f"Пауза {пауза}с перед рестартом…")
