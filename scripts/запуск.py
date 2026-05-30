@@ -29,9 +29,11 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ─────────────────────────────────────────────────────────────────────────
 # Совместимость интерпретатора
@@ -196,7 +198,7 @@ def url_живой(url, таймаут=8):
 
 def завершить_старые():
     """Аккуратно убивает прежние процессы перед стартом."""
-    for имя in ("ssh.exe", "cloudflared.exe"):
+    for имя in ("ssh.exe", "cloudflared.exe", "ngrok.exe"):
         try:
             subprocess.run(["taskkill", "/F", "/IM", имя],
                            capture_output=True, timeout=5)
@@ -402,7 +404,7 @@ def запустить_ngrok(лог):
     args = [
         ngrok, "http",
         f"--domain={domain}",
-        str(ПОРТ),
+        f"127.0.0.1:{ПОРТ}",  # явно IPv4 — ngrok иначе резолвит localhost в [::1] и ловит ERR_NGROK_8012
         "--log=stdout",
         "--log-format=logfmt",
     ]
@@ -704,8 +706,16 @@ def обновить_qr_страницу(url, провайдер, статус="
 
   let TUNNEL_URL = {repr(серверный_url)};
   let LAST_PYTHON_BUST = {bust};
-  const STATUS_FILE = "qr_status.txt";
-  const QR_FILE = "qr.png";
+  // Если страница открыта по file:// (двойной клик из проводника),
+  // браузер блокирует fetch к локальным файлам из-за CORS. Перенаправляем
+  // все запросы на локальный сервер, который launcher поднимает на :{ПОРТ_QR_СЕРВЕРА}.
+  // Если страница уже открыта через http://localhost — оставляем
+  // относительные пути (нагрузка на сервер чуть меньше, кэширование чище).
+  const BASE = (window.location.protocol === 'file:')
+    ? 'http://localhost:{ПОРТ_QR_СЕРВЕРА}/'
+    : '';
+  const STATUS_FILE = BASE + "qr_status.txt";
+  const QR_FILE = BASE + "qr.png";
   const HEARTBEAT_СТАЛО_СТАРО_СЕК = 30;
 
   const elStatus   = document.getElementById('status');
@@ -721,6 +731,8 @@ def обновить_qr_страницу(url, провайдер, статус="
   }}
 
   async function pullPythonStatus() {{
+    // STATUS_FILE уже либо относительный (если страница открыта по
+    // http://localhost), либо абсолютный к локальному серверу (если file://).
     try {{
       const r = await fetch(STATUS_FILE + '?t=' + Date.now(),
                             {{cache: 'no-store'}});
@@ -784,6 +796,15 @@ def обновить_qr_страницу(url, провайдер, статус="
     }}
   }}
 
+  // Если страница открыта по file://, начальный QR.png в HTML тоже
+  // живёт по относительному file://-пути — он у нас сейчас грузится
+  // через src в обычном <img>, при file:// браузер картинку показывает
+  // (это HTML, а не fetch — не блокируется), но при первом обновлении
+  // через JS мы перепишем src на локальный сервер для надёжности.
+  if (BASE && elQr && elQr.tagName === 'IMG') {{
+    elQr.src = QR_FILE + '?t=' + LAST_PYTHON_BUST;
+  }}
+
   tick();
   setInterval(tick, 5000);
 }})();
@@ -810,6 +831,17 @@ def обновить_qr_страницу(url, провайдер, статус="
 
 
 def открыть_файл(путь):
+    """Открывает локальный файл или URL в дефолтном приложении.
+
+    Для http-URL используем webbrowser — os.startfile с https-аргументом
+    срабатывает не на всех Windows-инсталляциях."""
+    if путь.startswith(("http://", "https://")):
+        try:
+            import webbrowser
+            webbrowser.open(путь)
+        except Exception:
+            pass
+        return
     if os.name == "nt":
         try:
             os.startfile(путь)
@@ -817,6 +849,98 @@ def открыть_файл(путь):
             pass
     else:
         subprocess.run(["xdg-open", путь], check=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Локальный HTTP-сервер для qr.html
+# ─────────────────────────────────────────────────────────────────────────
+# JS на странице qr.html делает fetch('qr_status.txt') каждые 5 сек.
+# Если страницу открыли по file://, Chromium и Firefox блокируют этот
+# fetch из-за CORS-политики на локальных файлах — JS видит ошибку и
+# рисует «нет связи с launcher», хотя watchdog честно пишет файл.
+# Решение: поднимаем мини-HTTP на 127.0.0.1:8502, отдающий qr.html и
+# qr_status.txt с одного origin — fetch разрешён, индикатор работает.
+
+ПОРТ_QR_СЕРВЕРА = int(os.environ.get("NAV_QR_PORT", "8502"))
+
+
+class _QRHandler(BaseHTTPRequestHandler):
+    """Раздаёт qr.html, qr.png и qr_status.txt с no-cache.
+
+    Игнорирует всё остальное. Без листинга директории — мы не файл-сервер.
+    """
+    _ALLOWED = {
+        "/": ("qr.html", "text/html; charset=utf-8"),
+        "/qr.html": ("qr.html", "text/html; charset=utf-8"),
+        "/qr.png": ("qr.png", "image/png"),
+        "/qr_status.txt": ("qr_status.txt", "text/plain; charset=utf-8"),
+    }
+
+    def do_GET(self):  # noqa: N802 — имя метода фиксировано базовым классом
+        # Срезаем query string (?t=12345 — cache-bust от JS) перед поиском
+        # в whitelist'е. Без этого fetch с no-store ловит 404.
+        путь = self.path.split("?", 1)[0]
+        путь_имя = self._ALLOWED.get(путь)
+        if путь_имя is None:
+            self.send_error(404, "Not found")
+            return
+        имя, mime = путь_имя
+        полный = os.path.join(КОРЕНЬ, имя)
+        try:
+            with open(полный, "rb") as f:
+                содержимое = f.read()
+        except OSError:
+            self.send_error(404, "Not ready")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(содержимое)))
+        # Без этого браузер будет кэшировать qr_status.txt и JS не увидит
+        # обновлений heartbeat'а — тогда индикатор «онлайн» застрянет.
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.end_headers()
+        self.wfile.write(содержимое)
+
+    def log_message(self, формат, *args):  # noqa: N802
+        # Глушим стандартный access-log — он засоряет консоль launcher'а.
+        return
+
+
+_qr_сервер = None
+
+
+def запустить_qr_сервер():
+    """Поднимает локальный HTTP на 127.0.0.1:ПОРТ_QR_СЕРВЕРА в фоне.
+
+    Делается один раз за жизнь launcher'а. Идемпотентно — повторный
+    вызов ничего не делает. Закрытие сервера не нужно: daemon-поток
+    умрёт вместе с процессом.
+    """
+    global _qr_сервер
+    if _qr_сервер is not None:
+        return
+    try:
+        _qr_сервер = HTTPServer(("127.0.0.1", ПОРТ_QR_СЕРВЕРА), _QRHandler)
+    except OSError:
+        # Порт занят — отдаём None, qr.html откроем по file:// (с дисклеймером
+        # «связь с launcher» работать не будет, но QR покажется).
+        _qr_сервер = None
+        return
+    поток = threading.Thread(
+        target=_qr_сервер.serve_forever,
+        name="qr-http",
+        daemon=True,
+    )
+    поток.start()
+
+
+def url_qr_страницы():
+    """Возвращает URL для открытия в браузере. Если локальный сервер
+    поднялся — http://localhost, если нет — file:// как fallback."""
+    if _qr_сервер is not None:
+        return f"http://localhost:{ПОРТ_QR_СЕРВЕРА}/qr.html"
+    return ПУТЬ_QR_HTML
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -890,7 +1014,7 @@ def стартовый_цикл(состояние: Состояние) -> bool:
         # каждые 5 сек, поэтому пользователь не должен переоткрывать после
         # watchdog-рестарта со сменой URL. Старый qr.png тоже обновляется
         # на диске, но просмотрщики Windows за ним не следят.
-        открыть_файл(ПУТЬ_QR_HTML)
+        открыть_файл(url_qr_страницы())
         состояние.qr_открыт_впервые = True
 
     return True
@@ -926,7 +1050,7 @@ def стартовый_цикл_lan(состояние: Состояние) -> b
 
     обновить_qr_страницу(url, "lan", статус="ok")
     if not состояние.qr_открыт_впервые:
-        открыть_файл(ПУТЬ_QR_HTML)
+        открыть_файл(url_qr_страницы())
         состояние.qr_открыт_впервые = True
 
     return True
@@ -1004,6 +1128,12 @@ def главный():
 
     состояние = Состояние()
     остановлен = [False]
+
+    # Поднимаем локальный HTTP-сервер для qr.html. Без него страница
+    # открывается по file:// и JS-fetch к qr_status.txt блокируется
+    # CORS'ом в Chromium/Firefox — на странице горит «нет связи с
+    # launcher» хотя watchdog честно пишет heartbeat в файл.
+    запустить_qr_сервер()
 
     # Заранее создаём HTML-заглушку, чтобы пользователь мог открыть страницу
     # и видеть статус «запуск…» пока поднимается Streamlit.
