@@ -29,9 +29,31 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# ─────────────────────────────────────────────────────────────────────────
+# Совместимость интерпретатора
+# ─────────────────────────────────────────────────────────────────────────
+# Зависимости (streamlit/protobuf/qdrant-client/...) проверены и установлены
+# для Python 3.12. На 3.14 свежеустановленный Streamlit падает на старте с
+# `ImportError: cannot import name 'builder' from 'google.protobuf.internal'`
+# из-за устаревшего protobuf'а (нужен >=3.20.3, см. requirements.txt).
+# Не молчим, а сразу даём понятную ошибку с инструкцией — иначе watchdog
+# будет вечно крутить рестарт-цикл, а пользователь не поймёт почему сайт
+# не открывается.
+if sys.version_info[:2] != (3, 12):
+    подсказка = (
+        f"\n[ОШИБКА] Запущено на Python {sys.version_info.major}."
+        f"{sys.version_info.minor}, а проект собран под 3.12.\n"
+        "  Запусти через:  py -3.12 scripts/запуск.py\n"
+        "  Или используй:  scripts/запуск.cmd  (двойной клик)\n"
+    )
+    print(подсказка, file=sys.stderr)
+    sys.exit(1)
 
 import qrcode
 
@@ -45,6 +67,50 @@ import qrcode
 ПУТЬ_ТУННЕЛЬ_ЛОГ = os.path.join(КОРЕНЬ, "_tunnel.log")
 ПУТЬ_STREAMLIT_ЛОГ = os.path.join(КОРЕНЬ, "_streamlit.log")
 
+
+def _подгрузить_env():
+    """Читает .env из корня репо в os.environ, не перезаписывая уже заданные.
+
+    Streamlit и harvester умеют это сами через python-dotenv, а launcher
+    запускается до них — нам нужны NGROK_DOMAIN/LHR_USER здесь же.
+    Реализован минимально, без зависимости от python-dotenv: один проход
+    `KEY=VALUE`, кавычки снимаются, комментарии и пустые строки игнорятся.
+    """
+    путь = os.path.join(КОРЕНЬ, ".env")
+    if not os.path.isfile(путь):
+        return
+    try:
+        with open(путь, "r", encoding="utf-8") as f:
+            for строка in f:
+                строка = строка.strip()
+                if not строка or строка.startswith("#"):
+                    continue
+                if "=" not in строка:
+                    continue
+                ключ, значение = строка.split("=", 1)
+                ключ = ключ.strip()
+                значение = значение.strip().strip('"').strip("'")
+                # Не перезаписываем — env-переменные имеют приоритет над .env.
+                if ключ and ключ not in os.environ:
+                    os.environ[ключ] = значение
+    except OSError:
+        pass
+
+
+_подгрузить_env()
+
+# Режим запуска. По умолчанию — публичный (через SSH-туннель).
+# Если передан флаг --лан/--lan/--local: запускаемся ТОЛЬКО на LAN
+# (без туннеля). Это спасение когда у провайдера зарезан localhost.run
+# или сам провайдер сейчас деградировал. Сайт открывается с любого
+# устройства в той же Wi-Fi/Ethernet — этого достаточно, например, чтобы
+# показать защиту с телефона проверяющего.
+РЕЖИМ_LAN = any(arg in {"--лан", "--lan", "--local", "--только-локально"}
+                for arg in sys.argv[1:])
+# Streamlit слушает 127.0.0.1 в публичном режиме (туннель пробрасывает
+# на него внутри loopback'а) и 0.0.0.0 в LAN-режиме (доступ из локалки).
+STREAMLIT_BIND = "0.0.0.0" if РЕЖИМ_LAN else "127.0.0.1"
+
 HEALTH_TIMEOUT = 8
 HEALTH_INTERVAL = 15  # как часто watchdog проверяет состояние
 TUNNEL_URL_ОЖИДАНИЕ = 60  # сколько ждём публичный URL после старта SSH
@@ -57,6 +123,8 @@ RESTART_BACKOFF_МАКС = 300
 # Регулярки для поиска публичных URL в логе SSH
 RE_LHR_URL = re.compile(r"https://[a-zA-Z0-9\-]+\.lhr\.life")
 RE_SERVEO_URL = re.compile(r"https://[a-zA-Z0-9\-]+\.serveo\.net")
+# ngrok печатает url= в JSON-логе и в человеческом виде (Forwarding ...)
+RE_NGROK_URL = re.compile(r"https://[a-zA-Z0-9\-]+\.ngrok-free\.(?:dev|app)")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -114,6 +182,10 @@ def url_живой(url, таймаут=8):
                 # localhost.run требует этот header чтобы пропустить запрос
                 # без редиректа на промо-страницу:
                 "Accept": "*/*",
+                # ngrok без этого заголовка отдаёт interstitial-страницу
+                # с предупреждением «You are about to visit...» — не страшно
+                # с нашей стороны (всё равно будет 200), но шлём для чистоты.
+                "ngrok-skip-browser-warning": "1",
             },
         )
         с_ответом = urllib.request.urlopen(запрос, timeout=таймаут)
@@ -126,7 +198,7 @@ def url_живой(url, таймаут=8):
 
 def завершить_старые():
     """Аккуратно убивает прежние процессы перед стартом."""
-    for имя in ("ssh.exe", "cloudflared.exe"):
+    for имя in ("ssh.exe", "cloudflared.exe", "ngrok.exe"):
         try:
             subprocess.run(["taskkill", "/F", "/IM", имя],
                            capture_output=True, timeout=5)
@@ -184,7 +256,7 @@ def запустить_streamlit():
          os.path.join(КОРЕНЬ, "ui", "app.py"),
          "--server.headless", "true",
          "--server.port", str(ПОРТ),
-         "--server.address", "127.0.0.1",
+         "--server.address", STREAMLIT_BIND,
          "--server.enableXsrfProtection", "false",
          "--browser.gatherUsageStats", "false"],
         cwd=КОРЕНЬ,
@@ -246,13 +318,36 @@ def _ssh_базовые_опции():
 
 
 def запустить_localhostrun(лог):
-    """localhost.run, free tier. URL: https://*.lhr.life."""
+    """localhost.run, http://*.lhr.life.
+
+    Два режима:
+      1. Если задана env-переменная LHR_USER — подключаемся через
+         <LHR_USER>@localhost.run с SSH-ключом из ~/.ssh/id_ed25519.
+         Это даёт стабильный URL (reserved domain), привязанный к
+         аккаунту в admin.localhost.run, и более надёжное проксирование
+         (платные/авторизованные туннели не режутся как анонимные).
+      2. Без LHR_USER — подключаемся как `nokey@localhost.run`, домен
+         случайный, поведение как раньше.
+    """
     ssh = _ssh_бинарь()
     if not ssh:
         return None
-    args = [ssh, *_ssh_базовые_опции(),
-            "-R", f"80:localhost:{ПОРТ}",
-            "nokey@localhost.run"]
+
+    lhr_user = os.environ.get("LHR_USER", "").strip()
+    if lhr_user:
+        # Авторизованный туннель: ключ ed25519 из стандартного места.
+        # localhost.run по этому ключу узнаёт аккаунт и применяет
+        # привязанные reserved domain'ы.
+        ключ = os.path.join(os.path.expanduser("~"), ".ssh", "id_ed25519")
+        ключ_args = ["-i", ключ] if os.path.exists(ключ) else []
+        args = [ssh, *_ssh_базовые_опции(), *ключ_args,
+                "-R", f"80:localhost:{ПОРТ}",
+                f"{lhr_user}@localhost.run"]
+    else:
+        args = [ssh, *_ssh_базовые_опции(),
+                "-R", f"80:localhost:{ПОРТ}",
+                "nokey@localhost.run"]
+
     return subprocess.Popen(
         args, stdout=лог, stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
@@ -278,11 +373,57 @@ def запустить_serveo(лог):
     )
 
 
+def _ngrok_бинарь():
+    """Ищет ngrok.exe в стандартных местах Windows-установки.
+    Возвращает None если не нашёл."""
+    кандидаты = [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "ngrok", "ngrok.exe"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "ngrok", "ngrok.exe"),
+        shutil.which("ngrok") or "",
+    ]
+    for к in кандидаты:
+        if к and os.path.isfile(к):
+            return к
+    return None
+
+
+def запустить_ngrok(лог):
+    """ngrok-туннель к стабильному домену.
+
+    Требует:
+      1. Установленный ngrok.exe (см. _ngrok_бинарь).
+      2. Authtoken прописан через `ngrok config add-authtoken <token>`.
+      3. NGROK_DOMAIN в окружении — поддомен из admin.ngrok.com
+         (например, "moodiness-corral-armed.ngrok-free.dev").
+    Без NGROK_DOMAIN или без бинарника возвращаем None — провайдер пропускается.
+    """
+    ngrok = _ngrok_бинарь()
+    domain = os.environ.get("NGROK_DOMAIN", "").strip()
+    if not ngrok or not domain:
+        return None
+    args = [
+        ngrok, "http",
+        f"--domain={domain}",
+        f"127.0.0.1:{ПОРТ}",  # явно IPv4 — ngrok иначе резолвит localhost в [::1] и ловит ERR_NGROK_8012
+        "--log=stdout",
+        "--log-format=logfmt",
+    ]
+    return subprocess.Popen(
+        args, stdout=лог, stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
+
+
 # Список провайдеров туннеля по убыванию приоритета.
 # (имя, функция-стартер, регэксп для URL)
+# ngrok идёт первым: если NGROK_DOMAIN задан, это самый стабильный путь
+# (стабильный URL, не режется в РФ). Без NGROK_DOMAIN ngrok-провайдер
+# сразу возвращает None и переходим к localhost.run/serveo.
 ПРОВАЙДЕРЫ_ТУННЕЛЯ = [
+    ("ngrok",         запустить_ngrok,        RE_NGROK_URL),
     ("localhost.run", запустить_localhostrun, RE_LHR_URL),
-    ("serveo.net",     запустить_serveo,      RE_SERVEO_URL),
+    ("serveo.net",    запустить_serveo,       RE_SERVEO_URL),
 ]
 
 
@@ -356,6 +497,24 @@ def запустить_туннель():
 def сгенерировать_qr(url):
     qrcode.make(url).save(ПУТЬ_QR)
     return ПУТЬ_QR
+
+
+def определить_lan_ip():
+    """Возвращает IPv4 локальной сети, через который машина видна другим
+    устройствам в той же подсети. Без сетевых обращений — просто открывает
+    UDP-сокет к 8.8.8.8 (никаких пакетов наружу не уходит, getsockname()
+    возвращает локальный адрес интерфейса по умолчанию).
+
+    Если сети нет — возвращает 127.0.0.1 как fallback.
+    """
+    try:
+        с = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        с.connect(("8.8.8.8", 80))
+        ip = с.getsockname()[0]
+        с.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
 
 
 # Локальная HTML-страница с актуальным QR. Открывается ОДИН раз в браузере,
@@ -547,8 +706,16 @@ def обновить_qr_страницу(url, провайдер, статус="
 
   let TUNNEL_URL = {repr(серверный_url)};
   let LAST_PYTHON_BUST = {bust};
-  const STATUS_FILE = "qr_status.txt";
-  const QR_FILE = "qr.png";
+  // Если страница открыта по file:// (двойной клик из проводника),
+  // браузер блокирует fetch к локальным файлам из-за CORS. Перенаправляем
+  // все запросы на локальный сервер, который launcher поднимает на :{ПОРТ_QR_СЕРВЕРА}.
+  // Если страница уже открыта через http://localhost — оставляем
+  // относительные пути (нагрузка на сервер чуть меньше, кэширование чище).
+  const BASE = (window.location.protocol === 'file:')
+    ? 'http://localhost:{ПОРТ_QR_СЕРВЕРА}/'
+    : '';
+  const STATUS_FILE = BASE + "qr_status.txt";
+  const QR_FILE = BASE + "qr.png";
   const HEARTBEAT_СТАЛО_СТАРО_СЕК = 30;
 
   const elStatus   = document.getElementById('status');
@@ -564,6 +731,8 @@ def обновить_qr_страницу(url, провайдер, статус="
   }}
 
   async function pullPythonStatus() {{
+    // STATUS_FILE уже либо относительный (если страница открыта по
+    // http://localhost), либо абсолютный к локальному серверу (если file://).
     try {{
       const r = await fetch(STATUS_FILE + '?t=' + Date.now(),
                             {{cache: 'no-store'}});
@@ -627,6 +796,15 @@ def обновить_qr_страницу(url, провайдер, статус="
     }}
   }}
 
+  // Если страница открыта по file://, начальный QR.png в HTML тоже
+  // живёт по относительному file://-пути — он у нас сейчас грузится
+  // через src в обычном <img>, при file:// браузер картинку показывает
+  // (это HTML, а не fetch — не блокируется), но при первом обновлении
+  // через JS мы перепишем src на локальный сервер для надёжности.
+  if (BASE && elQr && elQr.tagName === 'IMG') {{
+    elQr.src = QR_FILE + '?t=' + LAST_PYTHON_BUST;
+  }}
+
   tick();
   setInterval(tick, 5000);
 }})();
@@ -653,6 +831,17 @@ def обновить_qr_страницу(url, провайдер, статус="
 
 
 def открыть_файл(путь):
+    """Открывает локальный файл или URL в дефолтном приложении.
+
+    Для http-URL используем webbrowser — os.startfile с https-аргументом
+    срабатывает не на всех Windows-инсталляциях."""
+    if путь.startswith(("http://", "https://")):
+        try:
+            import webbrowser
+            webbrowser.open(путь)
+        except Exception:
+            pass
+        return
     if os.name == "nt":
         try:
             os.startfile(путь)
@@ -660,6 +849,98 @@ def открыть_файл(путь):
             pass
     else:
         subprocess.run(["xdg-open", путь], check=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Локальный HTTP-сервер для qr.html
+# ─────────────────────────────────────────────────────────────────────────
+# JS на странице qr.html делает fetch('qr_status.txt') каждые 5 сек.
+# Если страницу открыли по file://, Chromium и Firefox блокируют этот
+# fetch из-за CORS-политики на локальных файлах — JS видит ошибку и
+# рисует «нет связи с launcher», хотя watchdog честно пишет файл.
+# Решение: поднимаем мини-HTTP на 127.0.0.1:8502, отдающий qr.html и
+# qr_status.txt с одного origin — fetch разрешён, индикатор работает.
+
+ПОРТ_QR_СЕРВЕРА = int(os.environ.get("NAV_QR_PORT", "8502"))
+
+
+class _QRHandler(BaseHTTPRequestHandler):
+    """Раздаёт qr.html, qr.png и qr_status.txt с no-cache.
+
+    Игнорирует всё остальное. Без листинга директории — мы не файл-сервер.
+    """
+    _ALLOWED = {
+        "/": ("qr.html", "text/html; charset=utf-8"),
+        "/qr.html": ("qr.html", "text/html; charset=utf-8"),
+        "/qr.png": ("qr.png", "image/png"),
+        "/qr_status.txt": ("qr_status.txt", "text/plain; charset=utf-8"),
+    }
+
+    def do_GET(self):  # noqa: N802 — имя метода фиксировано базовым классом
+        # Срезаем query string (?t=12345 — cache-bust от JS) перед поиском
+        # в whitelist'е. Без этого fetch с no-store ловит 404.
+        путь = self.path.split("?", 1)[0]
+        путь_имя = self._ALLOWED.get(путь)
+        if путь_имя is None:
+            self.send_error(404, "Not found")
+            return
+        имя, mime = путь_имя
+        полный = os.path.join(КОРЕНЬ, имя)
+        try:
+            with open(полный, "rb") as f:
+                содержимое = f.read()
+        except OSError:
+            self.send_error(404, "Not ready")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(содержимое)))
+        # Без этого браузер будет кэшировать qr_status.txt и JS не увидит
+        # обновлений heartbeat'а — тогда индикатор «онлайн» застрянет.
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.end_headers()
+        self.wfile.write(содержимое)
+
+    def log_message(self, формат, *args):  # noqa: N802
+        # Глушим стандартный access-log — он засоряет консоль launcher'а.
+        return
+
+
+_qr_сервер = None
+
+
+def запустить_qr_сервер():
+    """Поднимает локальный HTTP на 127.0.0.1:ПОРТ_QR_СЕРВЕРА в фоне.
+
+    Делается один раз за жизнь launcher'а. Идемпотентно — повторный
+    вызов ничего не делает. Закрытие сервера не нужно: daemon-поток
+    умрёт вместе с процессом.
+    """
+    global _qr_сервер
+    if _qr_сервер is not None:
+        return
+    try:
+        _qr_сервер = HTTPServer(("127.0.0.1", ПОРТ_QR_СЕРВЕРА), _QRHandler)
+    except OSError:
+        # Порт занят — отдаём None, qr.html откроем по file:// (с дисклеймером
+        # «связь с launcher» работать не будет, но QR покажется).
+        _qr_сервер = None
+        return
+    поток = threading.Thread(
+        target=_qr_сервер.serve_forever,
+        name="qr-http",
+        daemon=True,
+    )
+    поток.start()
+
+
+def url_qr_страницы():
+    """Возвращает URL для открытия в браузере. Если локальный сервер
+    поднялся — http://localhost, если нет — file:// как fallback."""
+    if _qr_сервер is not None:
+        return f"http://localhost:{ПОРТ_QR_СЕРВЕРА}/qr.html"
+    return ПУТЬ_QR_HTML
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -733,7 +1014,43 @@ def стартовый_цикл(состояние: Состояние) -> bool:
         # каждые 5 сек, поэтому пользователь не должен переоткрывать после
         # watchdog-рестарта со сменой URL. Старый qr.png тоже обновляется
         # на диске, но просмотрщики Windows за ним не следят.
-        открыть_файл(ПУТЬ_QR_HTML)
+        открыть_файл(url_qr_страницы())
+        состояние.qr_открыт_впервые = True
+
+    return True
+
+
+def стартовый_цикл_lan(состояние: Состояние) -> bool:
+    """Стартовый цикл без публичного туннеля — Streamlit на 0.0.0.0,
+    URL — http://<lan-ip>:<port>. Подходит когда туннель в РФ режется
+    провайдером и публичную ссылку не получить.
+
+    QR-страница и watchdog работают как обычно, только проверка
+    «внешнего URL» идёт по LAN-адресу (он точно отвечает пока сетевая
+    карта жива), а не по https://*.lhr.life."""
+    завершить_старые()
+    time.sleep(2)
+
+    if not порт_свободен(ПОРТ):
+        time.sleep(3)
+
+    печать(f"Запускаю Streamlit на 0.0.0.0:{ПОРТ} (LAN-режим, без туннеля)")
+    состояние.streamlit = запустить_streamlit()
+    if not дождаться_streamlit():
+        печать("Streamlit не ответил health за 120с", метка="error")
+        return False
+
+    lan_ip = определить_lan_ip()
+    url = f"http://{lan_ip}:{ПОРТ}"
+    состояние.url = url
+    состояние.провайдер = "lan"
+    состояние.туннель = None  # туннеля нет — watchdog это поймёт
+    печать(f"Streamlit живой: http://localhost:{ПОРТ}  (LAN: {url})",
+           метка="ok")
+
+    обновить_qr_страницу(url, "lan", статус="ok")
+    if not состояние.qr_открыт_впервые:
+        открыть_файл(url_qr_страницы())
         состояние.qr_открыт_впервые = True
 
     return True
@@ -812,6 +1129,12 @@ def главный():
     состояние = Состояние()
     остановлен = [False]
 
+    # Поднимаем локальный HTTP-сервер для qr.html. Без него страница
+    # открывается по file:// и JS-fetch к qr_status.txt блокируется
+    # CORS'ом в Chromium/Firefox — на странице горит «нет связи с
+    # launcher» хотя watchdog честно пишет heartbeat в файл.
+    запустить_qr_сервер()
+
     # Заранее создаём HTML-заглушку, чтобы пользователь мог открыть страницу
     # и видеть статус «запуск…» пока поднимается Streamlit.
     обновить_qr_страницу("", "", статус="starting")
@@ -828,17 +1151,22 @@ def главный():
         pass  # Windows нюансы
 
     while not остановлен[0]:
-        ок = стартовый_цикл(состояние)
+        ок = стартовый_цикл_lan(состояние) if РЕЖИМ_LAN else стартовый_цикл(состояние)
         if ок:
             print()
             print("─" * 64)
             print(f"  Локально:    http://localhost:{ПОРТ}")
-            print(f"  Публично:    {состояние.url}")
-            print(f"  Провайдер:   {состояние.провайдер}")
+            if РЕЖИМ_LAN:
+                print(f"  По LAN:      {состояние.url}")
+                print(f"  Провайдер:   локальная сеть (без туннеля)")
+            else:
+                print(f"  Публично:    {состояние.url}")
+                print(f"  Провайдер:   {состояние.провайдер}")
             print(f"  QR-страница: {ПУТЬ_QR_HTML}")
             print(f"  QR-картинка: {ПУТЬ_QR}")
             print(f"  Streamlit:   {ПУТЬ_STREAMLIT_ЛОГ}")
-            print(f"  Туннель:     {ПУТЬ_ТУННЕЛЬ_ЛОГ}")
+            if not РЕЖИМ_LAN:
+                print(f"  Туннель:     {ПУТЬ_ТУННЕЛЬ_ЛОГ}")
             print("─" * 64)
             print(f"  Watchdog активен (health каждые {HEALTH_INTERVAL}с,")
             print(f"  внешний URL каждые 60с). Ctrl+C — стоп.\n")
