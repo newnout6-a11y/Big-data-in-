@@ -65,6 +65,38 @@ import qrcode
 ПУТЬ_ТУННЕЛЬ_ЛОГ = os.path.join(КОРЕНЬ, "_tunnel.log")
 ПУТЬ_STREAMLIT_ЛОГ = os.path.join(КОРЕНЬ, "_streamlit.log")
 
+
+def _подгрузить_env():
+    """Читает .env из корня репо в os.environ, не перезаписывая уже заданные.
+
+    Streamlit и harvester умеют это сами через python-dotenv, а launcher
+    запускается до них — нам нужны NGROK_DOMAIN/LHR_USER здесь же.
+    Реализован минимально, без зависимости от python-dotenv: один проход
+    `KEY=VALUE`, кавычки снимаются, комментарии и пустые строки игнорятся.
+    """
+    путь = os.path.join(КОРЕНЬ, ".env")
+    if not os.path.isfile(путь):
+        return
+    try:
+        with open(путь, "r", encoding="utf-8") as f:
+            for строка in f:
+                строка = строка.strip()
+                if not строка or строка.startswith("#"):
+                    continue
+                if "=" not in строка:
+                    continue
+                ключ, значение = строка.split("=", 1)
+                ключ = ключ.strip()
+                значение = значение.strip().strip('"').strip("'")
+                # Не перезаписываем — env-переменные имеют приоритет над .env.
+                if ключ and ключ not in os.environ:
+                    os.environ[ключ] = значение
+    except OSError:
+        pass
+
+
+_подгрузить_env()
+
 # Режим запуска. По умолчанию — публичный (через SSH-туннель).
 # Если передан флаг --лан/--lan/--local: запускаемся ТОЛЬКО на LAN
 # (без туннеля). Это спасение когда у провайдера зарезан localhost.run
@@ -89,6 +121,8 @@ RESTART_BACKOFF_МАКС = 300
 # Регулярки для поиска публичных URL в логе SSH
 RE_LHR_URL = re.compile(r"https://[a-zA-Z0-9\-]+\.lhr\.life")
 RE_SERVEO_URL = re.compile(r"https://[a-zA-Z0-9\-]+\.serveo\.net")
+# ngrok печатает url= в JSON-логе и в человеческом виде (Forwarding ...)
+RE_NGROK_URL = re.compile(r"https://[a-zA-Z0-9\-]+\.ngrok-free\.(?:dev|app)")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -146,6 +180,10 @@ def url_живой(url, таймаут=8):
                 # localhost.run требует этот header чтобы пропустить запрос
                 # без редиректа на промо-страницу:
                 "Accept": "*/*",
+                # ngrok без этого заголовка отдаёт interstitial-страницу
+                # с предупреждением «You are about to visit...» — не страшно
+                # с нашей стороны (всё равно будет 200), но шлём для чистоты.
+                "ngrok-skip-browser-warning": "1",
             },
         )
         с_ответом = urllib.request.urlopen(запрос, timeout=таймаут)
@@ -278,13 +316,36 @@ def _ssh_базовые_опции():
 
 
 def запустить_localhostrun(лог):
-    """localhost.run, free tier. URL: https://*.lhr.life."""
+    """localhost.run, http://*.lhr.life.
+
+    Два режима:
+      1. Если задана env-переменная LHR_USER — подключаемся через
+         <LHR_USER>@localhost.run с SSH-ключом из ~/.ssh/id_ed25519.
+         Это даёт стабильный URL (reserved domain), привязанный к
+         аккаунту в admin.localhost.run, и более надёжное проксирование
+         (платные/авторизованные туннели не режутся как анонимные).
+      2. Без LHR_USER — подключаемся как `nokey@localhost.run`, домен
+         случайный, поведение как раньше.
+    """
     ssh = _ssh_бинарь()
     if not ssh:
         return None
-    args = [ssh, *_ssh_базовые_опции(),
-            "-R", f"80:localhost:{ПОРТ}",
-            "nokey@localhost.run"]
+
+    lhr_user = os.environ.get("LHR_USER", "").strip()
+    if lhr_user:
+        # Авторизованный туннель: ключ ed25519 из стандартного места.
+        # localhost.run по этому ключу узнаёт аккаунт и применяет
+        # привязанные reserved domain'ы.
+        ключ = os.path.join(os.path.expanduser("~"), ".ssh", "id_ed25519")
+        ключ_args = ["-i", ключ] if os.path.exists(ключ) else []
+        args = [ssh, *_ssh_базовые_опции(), *ключ_args,
+                "-R", f"80:localhost:{ПОРТ}",
+                f"{lhr_user}@localhost.run"]
+    else:
+        args = [ssh, *_ssh_базовые_опции(),
+                "-R", f"80:localhost:{ПОРТ}",
+                "nokey@localhost.run"]
+
     return subprocess.Popen(
         args, stdout=лог, stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
@@ -310,11 +371,57 @@ def запустить_serveo(лог):
     )
 
 
+def _ngrok_бинарь():
+    """Ищет ngrok.exe в стандартных местах Windows-установки.
+    Возвращает None если не нашёл."""
+    кандидаты = [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "ngrok", "ngrok.exe"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "ngrok", "ngrok.exe"),
+        shutil.which("ngrok") or "",
+    ]
+    for к in кандидаты:
+        if к and os.path.isfile(к):
+            return к
+    return None
+
+
+def запустить_ngrok(лог):
+    """ngrok-туннель к стабильному домену.
+
+    Требует:
+      1. Установленный ngrok.exe (см. _ngrok_бинарь).
+      2. Authtoken прописан через `ngrok config add-authtoken <token>`.
+      3. NGROK_DOMAIN в окружении — поддомен из admin.ngrok.com
+         (например, "moodiness-corral-armed.ngrok-free.dev").
+    Без NGROK_DOMAIN или без бинарника возвращаем None — провайдер пропускается.
+    """
+    ngrok = _ngrok_бинарь()
+    domain = os.environ.get("NGROK_DOMAIN", "").strip()
+    if not ngrok or not domain:
+        return None
+    args = [
+        ngrok, "http",
+        f"--domain={domain}",
+        str(ПОРТ),
+        "--log=stdout",
+        "--log-format=logfmt",
+    ]
+    return subprocess.Popen(
+        args, stdout=лог, stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
+
+
 # Список провайдеров туннеля по убыванию приоритета.
 # (имя, функция-стартер, регэксп для URL)
+# ngrok идёт первым: если NGROK_DOMAIN задан, это самый стабильный путь
+# (стабильный URL, не режется в РФ). Без NGROK_DOMAIN ngrok-провайдер
+# сразу возвращает None и переходим к localhost.run/serveo.
 ПРОВАЙДЕРЫ_ТУННЕЛЯ = [
+    ("ngrok",         запустить_ngrok,        RE_NGROK_URL),
     ("localhost.run", запустить_localhostrun, RE_LHR_URL),
-    ("serveo.net",     запустить_serveo,      RE_SERVEO_URL),
+    ("serveo.net",    запустить_serveo,       RE_SERVEO_URL),
 ]
 
 
