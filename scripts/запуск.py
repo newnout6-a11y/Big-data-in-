@@ -365,6 +365,63 @@ def сгенерировать_qr(url):
 ПУТЬ_QR_СТАТУС = os.path.join(КОРЕНЬ, "qr_status.txt")  # текущий URL в текстовом виде
 
 
+def записать_heartbeat(состояние, url_статус: str = "ok"):
+    """Heartbeat для qr.html. Пишется watchdog'ом каждые 5 сек.
+
+    Содержит:
+      строка 1 — публичный URL;
+      строка 2 — провайдер;
+      строка 3 — статус ('ok' / 'starting' / 'down');
+      строка 4 — bust (timestamp генерации QR.png — для cache-bust);
+      строка 5 — heartbeat_ts (unix epoch сейчас).
+
+    JS на странице qr.html читает файл каждые 5 сек. Если heartbeat_ts
+    старше 30 сек — рисует «watchdog не отвечает». Если url_статус='down' —
+    рисует красный «нет соединения». Если 'ok' — зелёный «онлайн».
+
+    Без браузерного fetch на туннель: file:// странички не могут фечнуть
+    https-домен из-за CORS, поэтому проверка живости — через файл.
+    """
+    bust = int(time.time())
+    статус_итог = "ok" if url_статус == "ok" and (состояние.url or "") else \
+                  "down" if url_статус == "down" else "starting"
+    # Атомарная запись через os.replace: пишем в .tmp, потом переименовываем.
+    # Без этого JS на qr.html (или внешний наблюдатель) может прочитать файл
+    # в момент когда open("w") уже обнулил его, но f.write ещё не дошёл до
+    # 5-й строки. Получалось 4 строки → JS думал что heartbeat'а нет и
+    # рисовал «launcher молчит», хотя watchdog был жив.
+    payload = (
+        f"{состояние.url or ''}\n"
+        f"{состояние.провайдер or ''}\n"
+        f"{статус_итог}\n"
+        f"{bust}\n"
+        f"{int(time.time())}\n"  # heartbeat
+    )
+    _атомарно_записать_статус(payload)
+
+
+def _атомарно_записать_статус(payload: str):
+    """Пишет qr_status.txt атомарно: tmp-файл + os.replace.
+
+    На Windows os.replace это атомарная операция переименования
+    в пределах того же тома. Гарантия: внешний читатель (JS, smoke-test)
+    либо видит старое содержимое целиком, либо новое целиком — никогда
+    «половинку».
+    """
+    tmp = ПУТЬ_QR_СТАТУС + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+        os.replace(tmp, ПУТЬ_QR_СТАТУС)
+    except OSError:
+        # Если что-то пошло не так — подчистим временный файл.
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
 def обновить_qr_страницу(url, провайдер, статус="ok"):
     """Перегенерирует qr.png и пишет qr.html с актуальным URL и QR.
 
@@ -481,12 +538,18 @@ def обновить_qr_страницу(url, провайдер, статус="
 
 <script>
 (function() {{
+  // Все данные приходят от python-watchdog'а через qr_status.txt.
+  // Прямой fetch к туннелю не делаем — браузер с file:// его блокирует
+  // из-за CORS, никаких реальных проверок не получится. Вместо этого
+  // python-watchdog раз в 5 сек сам пишет в файл свежий heartbeat и
+  // url_статус (ok/down). Если heartbeat_ts > 30 сек — JS показывает
+  // «watchdog не отвечает» (значит сам python-процесс рухнул).
+
   let TUNNEL_URL = {repr(серверный_url)};
   let LAST_PYTHON_BUST = {bust};
-  let CONSECUTIVE_FAILS = 0;
-  const SOFT_FAIL_THRESHOLD = 2;
   const STATUS_FILE = "qr_status.txt";
   const QR_FILE = "qr.png";
+  const HEARTBEAT_СТАЛО_СТАРО_СЕК = 30;
 
   const elStatus   = document.getElementById('status');
   const elProvider = document.getElementById('provider');
@@ -500,20 +563,6 @@ def обновить_qr_страницу(url, провайдер, статус="
     elBody.className = 'is-' + name;
   }}
 
-  async function pingTunnel(url) {{
-    if (!url) return false;
-    try {{
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 6000);
-      await fetch(url.replace(/\\/$/, '') + '/_stcore/health',
-                  {{mode: 'no-cors', signal: ctrl.signal, cache: 'no-store'}});
-      clearTimeout(timer);
-      return true;
-    }} catch (e) {{
-      return false;
-    }}
-  }}
-
   async function pullPythonStatus() {{
     try {{
       const r = await fetch(STATUS_FILE + '?t=' + Date.now(),
@@ -522,61 +571,57 @@ def обновить_qr_страницу(url, провайдер, статус="
       const text = await r.text();
       const lines = text.split(/\\r?\\n/);
       return {{
-        url:       (lines[0] || '').trim(),
-        provider:  (lines[1] || '').trim(),
-        status:    (lines[2] || '').trim(),
-        bust:      parseInt(lines[3] || '0', 10),
+        url:           (lines[0] || '').trim(),
+        provider:      (lines[1] || '').trim(),
+        status:        (lines[2] || '').trim(),
+        bust:          parseInt(lines[3] || '0', 10),
+        heartbeat_ts:  parseInt(lines[4] || '0', 10),
       }};
     }} catch (e) {{
       return null;
     }}
   }}
 
-  function applyPythonState(s) {{
-    if (!s) return;
-    if (s.url !== TUNNEL_URL) {{
-      TUNNEL_URL = s.url;
-      if (s.url) {{
-        elUrl.innerHTML = '<a href="' + s.url + '" target="_blank" '
+  async function tick() {{
+    const py = await pullPythonStatus();
+    if (!py) {{
+      setStatus('down', '○ нет связи с launcher');
+      return;
+    }}
+
+    // 1. Обновляем URL (если сменился) и QR (если bust сменился)
+    if (py.url !== TUNNEL_URL) {{
+      TUNNEL_URL = py.url;
+      if (py.url) {{
+        elUrl.innerHTML = '<a href="' + py.url + '" target="_blank" '
           + 'style="color:#60a5fa;text-decoration:none;word-break:break-all">'
-          + s.url + '</a>';
+          + py.url + '</a>';
       }} else {{
         elUrl.innerHTML = '<span style="color:#888">URL появится при '
           + 'подключении туннеля</span>';
       }}
     }}
-    if (s.bust && s.bust !== LAST_PYTHON_BUST && elQr && elQr.tagName === 'IMG') {{
-      elQr.src = QR_FILE + '?t=' + s.bust;
-      LAST_PYTHON_BUST = s.bust;
+    if (py.bust && py.bust !== LAST_PYTHON_BUST && elQr && elQr.tagName === 'IMG') {{
+      elQr.src = QR_FILE + '?t=' + py.bust;
+      LAST_PYTHON_BUST = py.bust;
     }}
-    if (s.provider && elProvider) {{
-      elProvider.innerHTML = 'через <b>' + s.provider + '</b>';
+    if (py.provider && elProvider) {{
+      elProvider.innerHTML = 'через <b>' + py.provider + '</b>';
     }}
-    if (s.status === 'down') {{
-      setStatus('down', '○ восстанавливается…');
-      CONSECUTIVE_FAILS = SOFT_FAIL_THRESHOLD;
-    }} else if (s.status === 'starting') {{
-      setStatus('starting', '◐ запуск…');
-    }}
-  }}
 
-  async function tick() {{
-    const py = await pullPythonStatus();
-    applyPythonState(py);
+    // 2. Heartbeat: если python давно не обновлял файл — что-то не так
+    const сейчас = Math.floor(Date.now() / 1000);
+    if (py.heartbeat_ts && (сейчас - py.heartbeat_ts) > HEARTBEAT_СТАЛО_СТАРО_СЕК) {{
+      const прошло = сейчас - py.heartbeat_ts;
+      setStatus('down', '○ launcher молчит ' + прошло + ' сек');
+      return;
+    }}
 
-    if (TUNNEL_URL) {{
-      const живой = await pingTunnel(TUNNEL_URL);
-      if (живой) {{
-        CONSECUTIVE_FAILS = 0;
-        setStatus('ok', '● онлайн');
-      }} else {{
-        CONSECUTIVE_FAILS++;
-        if (CONSECUTIVE_FAILS >= SOFT_FAIL_THRESHOLD) {{
-          setStatus('down', '○ нет соединения, восстанавливаем…');
-        }} else {{
-          setStatus('starting', '◐ проверяем соединение…');
-        }}
-      }}
+    // 3. Решающий статус — то что сказал watchdog
+    if (py.status === 'ok' && py.url) {{
+      setStatus('ok', '● онлайн');
+    }} else if (py.status === 'down') {{
+      setStatus('down', '○ туннель упал, восстанавливаем…');
     }} else {{
       setStatus('starting', '◐ запуск…');
     }}
@@ -594,11 +639,17 @@ def обновить_qr_страницу(url, провайдер, статус="
             f.write(html_страница)
     except OSError:
         pass
-    try:
-        with open(ПУТЬ_QR_СТАТУС, "w", encoding="utf-8") as f:
-            f.write(f"{url or ''}\n{провайдер or ''}\n{статус}\n{bust}\n")
-    except OSError:
-        pass
+    # 5 строк: url, провайдер, статус, bust (для qr.png), heartbeat_ts.
+    # Атомарно через _атомарно_записать_статус — иначе внешний читатель
+    # ловил файл в момент open("w") и видел нулевую длину или 4 строки.
+    now_ts = int(time.time())
+    _атомарно_записать_статус(
+        f"{url or ''}\n"
+        f"{провайдер or ''}\n"
+        f"{статус}\n"
+        f"{bust}\n"
+        f"{now_ts}\n"
+    )
 
 
 def открыть_файл(путь):
@@ -690,16 +741,32 @@ def стартовый_цикл(состояние: Состояние) -> bool:
 
 def watchdog(состояние: Состояние, остановлен_callback):
     """Бесконечный цикл проверок. Возвращает 'fail' если что-то умерло,
-    'stop' если пользователь нажал Ctrl+C."""
+    'stop' если пользователь нажал Ctrl+C.
+
+    Дополнительно каждые 5 сек обновляет qr_status.txt — это heartbeat
+    для открытой qr.html-страницы. Если страница видит что timestamp в
+    файле > 30 сек назад, она показывает «watchdog не отвечает» (значит
+    процесс python упал и watchdog некому делать).
+    """
     стабильность_старт = time.time()
     последняя_проверка = 0
     последняя_url_проверка = 0
+    последний_heartbeat = 0
+    последний_url_статус = "ok"  # "ok" | "down"
 
     while True:
         if остановлен_callback():
             return "stop"
         time.sleep(1)
         сейчас = time.time()
+
+        # Heartbeat для qr.html — пишется каждые 5 сек чтобы JS видел что
+        # watchdog жив. Браузер по file:// не может фечнуть https-туннель,
+        # поэтому единственный честный сигнал «онлайн» — это свежий
+        # heartbeat в файле + last_url_check_ok=True.
+        if сейчас - последний_heartbeat >= 5:
+            последний_heartbeat = сейчас
+            записать_heartbeat(состояние, последний_url_статус)
 
         # Раз в HEALTH_INTERVAL — локальный health
         if сейчас - последняя_проверка >= HEALTH_INTERVAL:
@@ -721,18 +788,17 @@ def watchdog(состояние: Состояние, остановлен_callba
                        f"(rc={проц_тн.returncode})", метка="error")
                 return "fail"
 
-            # Если стабильно работаем дольше СТАБИЛЬНЫЙ_АПТАЙМ — сбрасываем
-            # backoff: следующий рестарт будет с малой паузы.
             if сейчас - стабильность_старт > СТАБИЛЬНЫЙ_АПТАЙМ:
                 if состояние.backoff != RESTART_BACKOFF_СТАРТ:
                     состояние.backoff = RESTART_BACKOFF_СТАРТ
 
-        # Раз в минуту — внешний healthcheck публичного URL.
-        # Туннель может быть «формально жив» (процесс не упал), но
-        # перестать проксировать — например, при ребуте на стороне lhr.
-        if состояние.url and (сейчас - последняя_url_проверка >= 60):
+        # Раз в 30 сек — внешний healthcheck публичного URL (раньше было 60,
+        # сократил чтобы быстрее ловить «формально жив, но не проксирует»).
+        if состояние.url and (сейчас - последняя_url_проверка >= 30):
             последняя_url_проверка = сейчас
-            if not url_живой(состояние.url):
+            если_жив = url_живой(состояние.url)
+            последний_url_статус = "ok" if если_жив else "down"
+            if not если_жив:
                 печать(f"Внешний URL {состояние.url} не отвечает — рестарт",
                        метка="error")
                 return "fail"
