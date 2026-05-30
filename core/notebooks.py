@@ -273,10 +273,19 @@ def ingest_uploaded_files(
             )
             if not chunks:
                 summary["errors"].append(f"{filename}: не удалось извлечь текст")
+                # C1 fix: PDF/DOCX уже на диске, но в notebook["files"] он
+                # не попадёт — без cleanup это сиротский файл, копящий место.
+                # Картинки (extracted_images/) и кэш visual_index/ оставляем —
+                # они валидны и переиспользуются при повторной загрузке.
+                _удалить_тихо(target)
                 continue
             upsert_chunks(client, model, notebook["collection"], chunks)
         except Exception as error:
             summary["errors"].append(f"{filename}: {error}")
+            # Та же логика: при любой ошибке (битый PDF, OOM в OCR, обрыв сети,
+            # сбой Qdrant) удаляем файл с диска. Если он остался валидным,
+            # пользователь может загрузить его снова.
+            _удалить_тихо(target)
             continue
 
         notebook.setdefault("files", []).append({
@@ -1103,6 +1112,20 @@ def _safe_tag(value: str) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _удалить_тихо(путь: Path) -> None:
+    """Удаляет файл с диска, не падая если уже нет. Используется при cleanup
+    в ingest_uploaded_files: если индексация не дошла до пометки файла в
+    notebook["files"], сам PDF на диске становится сиротой — освобождаем."""
+    try:
+        if путь.is_file():
+            путь.unlink()
+    except OSError:
+        # Не валим весь ingest из-за невозможности удалить мусор.
+        # На Windows блокировка файла редка — даже если случится, оставшийся
+        # файл максимум занимает диск, не ломает функциональность.
+        pass
 
 
 def _payload(fragment: Any) -> dict[str, Any]:

