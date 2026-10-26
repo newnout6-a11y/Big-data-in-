@@ -91,10 +91,14 @@ def main(argv=None):
         команда_ingest = [sys.executable, os.path.join("pipeline", "ingest_v2.py")]
         код2, дл2 = _запустить(команда_ingest, окруж)
         отчёт["steps"]["ingest"] = {"return_code": код2, "seconds": round(дл2, 1)}
+    elif not args.skip_ingest:
+        отчёт["steps"]["ingest"] = {"return_code": 124, "seconds": 0, "reason": "deadline"}
 
     # Шаг 2.5 — РАННИЙ push в Drive после ingest (до медленного embed).
-    # Гарантирует что PDF + chunks_v2.jsonl + state.json уже на Drive
-    # ДАЖЕ ЕСЛИ embed зависнет на часы и runner будет убит timeout-ом.
+    # Сохраняет исходники, метаданные и state.json на Drive, даже если
+    # embed зависнет на часы и runner будет убит по timeout.
+    # При восстановлении исходники скачиваются ДО checkpoint, поэтому
+    # ingest/embed смогут повториться даже без локального chunks_v2.jsonl.
     if os.getenv("GDRIVE_REMOTE") or os.getenv("RCLONE_CONFIG"):
         команда_early_push = [sys.executable, "-m", "harvester.gdrive_rclone", "push"]
         код_ep, дл_ep = _запустить(команда_early_push, окруж)
@@ -108,6 +112,8 @@ def main(argv=None):
         команда_embed = [sys.executable, os.path.join("pipeline", "embed_resume_v2.py")]
         код3, дл3 = _запустить(команда_embed, окруж)
         отчёт["steps"]["embed"] = {"return_code": код3, "seconds": round(дл3, 1)}
+    elif not args.skip_embed:
+        отчёт["steps"]["embed"] = {"return_code": 124, "seconds": 0, "reason": "deadline"}
 
     # Шаг 4 — S3 upload (опционально, только если заданы креды и есть время)
     if os.getenv("S3_BUCKET") and time.time() < дедлайн:
@@ -134,7 +140,7 @@ def main(argv=None):
         json.dump(отчёт, f, ensure_ascii=False, indent=2)
 
     print(f"\nОтчёт: {путь_отчёта}")
-    return 0
+    return int(any(шаг["return_code"] != 0 for шаг in отчёт["steps"].values()))
 
 
 if __name__ == "__main__":

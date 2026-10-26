@@ -143,9 +143,9 @@ def test_залить_полный_проход(monkeypatch, tmp_path):
     assert fake_run.call_count == 6
 
     команды = [tuple(call.args[0]) for call in fake_run.call_args_list]
-    # state.json — первая команда (copyto)
-    assert "copyto" in команды[0]
-    assert "myremote:корень/state/state.json" in команды[0]
+    # Checkpoint публикуется после всех исходников (последняя команда).
+    assert "copyto" in команды[-1]
+    assert "myremote:корень/state/state.json" in команды[-1]
     # PDF: copy с --include "*.pdf"
     assert any("copy" in к and "--include" in к and "*.pdf" in к and
                "myremote:корень/pdf/" in к for к in команды)
@@ -218,7 +218,13 @@ def test_pull_state_успех(monkeypatch, tmp_path):
     monkeypatch.delenv("RCLONE_CONFIG", raising=False)
 
     fake_result = MagicMock(returncode=0, stderr="", stdout="")
-    fake_run = MagicMock(return_value=fake_result)
+
+    def download(command, **kwargs):
+        destination = Path(command[command.index("copyto") + 2])
+        destination.write_text('{"sources": {}, "downloaded_ids": []}', encoding="utf-8")
+        return fake_result
+
+    fake_run = MagicMock(side_effect=download)
     with patch("harvester.gdrive_rclone._путь_к_rclone", return_value="/r"):
         with patch("harvester.gdrive_rclone.subprocess.run", fake_run):
             assert gdrive_rclone.подтянуть_state() == 0
@@ -227,7 +233,10 @@ def test_pull_state_успех(monkeypatch, tmp_path):
     assert команда[0] == "/r"
     assert "copyto" in команда
     assert "gdrive:big-data/state/state.json" in команда
-    assert str(Path(tmp_path) / "harvester" / "state.json") in команда
+    destination = Path(команда[команда.index("copyto") + 2])
+    assert destination.parent == Path(tmp_path) / "harvester"
+    assert destination.name != "state.json"
+    assert (tmp_path / "harvester" / "state.json").exists()
 
 
 def test_pull_state_когда_файла_нет_в_drive(monkeypatch, tmp_path, capsys):
@@ -251,7 +260,8 @@ def test_pull_state_dry_run_не_зовёт_subprocess(monkeypatch, tmp_path):
     fake_run.assert_not_called()
 
 
-def test_pull_state_без_rclone(monkeypatch, capsys):
+def test_pull_state_без_rclone(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(gdrive_rclone, "_БАЗА", str(tmp_path))
     monkeypatch.delenv("RCLONE_BIN", raising=False)
     with patch("harvester.gdrive_rclone.shutil.which", return_value=None):
         assert gdrive_rclone.подтянуть_state() == 0
@@ -263,8 +273,8 @@ def test_pull_state_без_rclone(monkeypatch, capsys):
 def test_main_push_state_only(monkeypatch):
     monkeypatch.delenv("RCLONE_BIN", raising=False)
     with patch("harvester.gdrive_rclone.shutil.which", return_value=None):
-        # Без rclone — просто отрабатывает без ошибки.
-        assert gdrive_rclone.main(["push", "--state-only"]) == 0
+        # Явный CLI push должен сообщить, что загрузка не выполнена.
+        assert gdrive_rclone.main(["push", "--state-only"]) == 1
 
 
 def test_main_pull_state_dry_run(monkeypatch):

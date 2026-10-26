@@ -5,6 +5,7 @@
 
 # Векторная БД (большая, регенерируется через embed_resume.py)
 qdrant_db/
+qdrant_ui/
 
 # Выход из ingest.py / ingest_v2.py (40+ МБ, генерируется)
 chunks.jsonl

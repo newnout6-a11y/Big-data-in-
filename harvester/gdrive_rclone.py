@@ -18,7 +18,8 @@
 
 Команды CLI:
 
-    python -m harvester.gdrive_rclone pull-state    # скачать state.json до парсинга
+    python -m harvester.gdrive_rclone pull-state    # восстановить исходники и state.json
+    python -m harvester.gdrive_rclone pull-state --force  # восстановить свежий runner
     python -m harvester.gdrive_rclone push          # залить всё после парсинга
     python -m harvester.gdrive_rclone push --state-only  # быстрый сейв чекпоинта
     python -m harvester.gdrive_rclone push --dry-run
@@ -30,10 +31,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -100,48 +103,30 @@ def доступен() -> bool:
     return _путь_к_rclone() is not None
 
 
-def залить(dry_run: bool = False, только_state: bool = False) -> int:
+def залить(dry_run: bool = False, только_state: bool = False, *, strict: bool = False) -> int:
     """Заливает локальные данные в Drive. Возвращает число успешных операций rclone.
 
     Если `только_state=True` — заливает только `harvester/state.json` (быстрый сейв).
+    Полный push публикует checkpoint после успешной загрузки всех данных.
+    При strict=True сообщает об ошибках исключением после попытки всех маршрутов.
     """
     rclone = _путь_к_rclone()
     if not rclone:
         print("[gdrive] rclone не найден в PATH (env RCLONE_BIN тоже пустой) — "
               "пропускаю загрузку. Установи с https://rclone.org/downloads/",
               flush=True)
+        if strict:
+            raise RuntimeError("rclone не найден: загрузка не выполнена")
         return 0
 
     remote, base = _получить_remote_и_base()
     общие = [rclone, *_аргументы_конфига()]
 
     успешных = 0
-    путь_state = Path(_БАЗА) / "harvester" / ИМЯ_ФАЙЛА_СОСТОЯНИЯ
-    if путь_state.exists():
-        # rclone copyto — для одиночного файла с явным именем назначения.
-        команда = [
-            *общие,
-            "copyto",
-            str(путь_state),
-            f"{remote}:{base}/state/{ИМЯ_ФАЙЛА_СОСТОЯНИЯ}",
-            "--quiet",
-        ]
-        код = _выполнить(команда, dry_run)
-        if код == 0:
-            успешных += 1
-        else:
-            print(f"[gdrive] state.json не залился (rc={код})", flush=True)
-    else:
-        print(f"[gdrive] {путь_state} не найден — пропускаю state-step",
-              flush=True)
-
-    if только_state:
-        print(f"[gdrive] state-only: {успешных} операция(й) ОК", flush=True)
-        return успешных
-
+    ошибок = 0
     # PDF/DOCX/TXT/meta. Используем `rclone copy` с --include для разделения
     # по расширению: один общий source-каталог, разные dest-каталоги.
-    for локальная_папка, drive_подпапка, фильтр in _МАРШРУТЫ:
+    for локальная_папка, drive_подпапка, фильтр in (() if только_state else _МАРШРУТЫ):
         источник = Path(_БАЗА) / локальная_папка
         if not источник.exists():
             continue
@@ -167,64 +152,148 @@ def залить(dry_run: bool = False, только_state: bool = False) -> int
             print(f"[gdrive] OK {drive_подпапка} ← {локальная_папка}/"
                   f"{фильтр or '*'}", flush=True)
         else:
+            ошибок += 1
             print(f"[gdrive] FAIL {drive_подпапка} ← {локальная_папка}/"
                   f"{фильтр or '*'} (rc={код})", flush=True)
 
+    # Checkpoint содержит downloaded_ids: следующий runner не скачает эти
+    # документы заново. Поэтому нельзя публиковать его раньше исходников
+    # или после неудачной загрузки хотя бы одного маршрута данных.
+    путь_state = Path(_БАЗА) / "harvester" / ИМЯ_ФАЙЛА_СОСТОЯНИЯ
+    if ошибок:
+        print("[gdrive] state.json не публикуется: загрузка данных не завершена", flush=True)
+    elif путь_state.exists():
+        команда = [
+            *общие,
+            "copyto",
+            str(путь_state),
+            f"{remote}:{base}/state/{ИМЯ_ФАЙЛА_СОСТОЯНИЯ}",
+            "--quiet",
+        ]
+        код = _выполнить(команда, dry_run)
+        if код == 0:
+            успешных += 1
+        else:
+            ошибок += 1
+            print(f"[gdrive] state.json не залился (rc={код})", flush=True)
+    else:
+        print(f"[gdrive] {путь_state} не найден — пропускаю state-step", flush=True)
+
+    if только_state:
+        print(f"[gdrive] state-only: {успешных} операция(й) ОК", flush=True)
+        if strict and (ошибок or not успешных):
+            raise RuntimeError("state.json не загружен в Drive")
+        return успешных
+
     print(f"[gdrive] итого: {успешных} операция(й) ОК", flush=True)
+    if strict and ошибок:
+        raise RuntimeError(f"Загрузка в Drive: {ошибок} операция(й) завершились ошибкой")
     return успешных
 
 
-def подтянуть_state(dry_run: bool = False) -> int:
+def _восстановить_корпус(rclone: str, remote: str, base: str) -> int:
+    """Восстанавливает исходники для повторного ingest/embed на свежем runner."""
+    for локальная_папка, подпапка, фильтр in _МАРШРУТЫ:
+        destination = Path(_БАЗА) / локальная_папка
+        destination.mkdir(parents=True, exist_ok=True)
+        команда = [rclone, *_аргументы_конфига(), "copy",
+                   f"{remote}:{base}/{подпапка}/", str(destination), "--quiet"]
+        if фильтр:
+            команда.extend(["--include", фильтр])
+        print(f"[gdrive] $ {' '.join(команда)}", flush=True)
+        результат = subprocess.run(команда, check=False, capture_output=True, text=True)
+        if результат.returncode:
+            # Пустые маршруты push не создаёт: например, DOCX/картинок
+            # в корпусе могло никогда не быть. Сетевые ошибки не скрываем.
+            if результат.returncode == 3 and "directory not found" in (результат.stderr or "").lower():
+                continue
+            print(f"[gdrive] Не восстановлен {подпапка}: {результат.stderr}", flush=True)
+            return результат.returncode
+    return 0
+
+
+def подтянуть_state(dry_run: bool = False, *, force: bool = False) -> int:
     """Скачивает state.json из Drive в `harvester/state.json`.
 
-    Используется в начале прогона — чтобы харвестер продолжил с того места,
-    где остановился предыдущий runner. Если в Drive ещё нет state.json
-    (первый запуск) — печатает сообщение и возвращает 0 без падения.
+    По умолчанию сохраняет локальный прогресс между итерациями loop.
+    Свежий checkout уже содержит state.json из Git: перед loop нужен один
+    вызов с force=True. До атомарной замены checkpoint восстанавливаем
+    исходники: downloaded_ids ещё не означают успешную векторизацию.
+    Отсутствие checkpoint в Drive нормально для первого запуска.
     """
+    путь_state = Path(_БАЗА) / "harvester" / ИМЯ_ФАЙЛА_СОСТОЯНИЯ
+    if путь_state.exists() and not force:
+        print("[gdrive] локальный state.json сохранён (для восстановления из Drive: --force)",
+              flush=True)
+        return 0
+
     rclone = _путь_к_rclone()
     if not rclone:
         print("[gdrive] rclone не найден — пропускаю pull-state", flush=True)
-        return 0
+        return 127 if force else 0
 
     remote, base = _получить_remote_и_base()
-    путь_state = Path(_БАЗА) / "harvester" / ИМЯ_ФАЙЛА_СОСТОЯНИЯ
-    путь_state.parent.mkdir(parents=True, exist_ok=True)
-
     команда = [
         rclone,
         *_аргументы_конфига(),
         "copyto",
         f"{remote}:{base}/state/{ИМЯ_ФАЙЛА_СОСТОЯНИЯ}",
-        str(путь_state),
-        "--ignore-existing", "--quiet",
+        str(путь_state.with_suffix(".download.tmp")),
+        "--quiet",
     ]
-    # --ignore-existing: если у нас уже есть локальный state.json (свежее
-    # после прошлой итерации) — не перезаписывать. Это безопасно для loop'а.
-    # Для свежего runner'а локального state нет, и rclone скачает свежий.
 
     if dry_run:
         print(f"[gdrive] DRY $ {' '.join(команда)}", flush=True)
         return 0
 
-    print(f"[gdrive] $ {' '.join(команда)}", flush=True)
-    результат = subprocess.run(команда, check=False, capture_output=True, text=True)
-    if результат.returncode == 0:
-        if путь_state.exists():
-            размер = путь_state.stat().st_size // 1024
-            print(f"[gdrive] state.json подтянут ({размер} КБ) или уже актуален",
-                  flush=True)
-        return 0
+    временный = None
+    try:
+        путь_state.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=путь_state.parent, prefix=".state-", suffix=".download.tmp", delete=False,
+        ) as файл:
+            временный = Path(файл.name)
+        команда[команда.index("copyto") + 2] = str(временный)
+        print(f"[gdrive] $ {' '.join(команда)}", flush=True)
+        результат = subprocess.run(команда, check=False, capture_output=True, text=True)
+        if результат.returncode != 0:
+            stderr = (результат.stderr or "").lower()
+            if "object not found" in stderr or "directory not found" in stderr:
+                print("[gdrive] state.json в Drive ещё нет — стартуем с нуля", flush=True)
+                return 0
+            print(f"[gdrive] pull-state упал (rc={результат.returncode}): "
+                  f"{(результат.stderr or '').strip()}", flush=True)
+            return результат.returncode
 
-    # Нет файла в Drive — нормально для первого запуска. rclone в этом случае
-    # выводит "directory not found" / "object not found" и rc != 0.
-    stderr = (результат.stderr or "").lower()
-    if "not found" in stderr or "doesn't exist" in stderr or "no such" in stderr:
-        print("[gdrive] state.json в Drive ещё нет — стартуем с нуля",
-              flush=True)
+        данные = json.loads(временный.read_text(encoding="utf-8"))
+        # v2 ещё не содержит normalized_ids/domain_counts: миграция остаётся
+        # в state.прочитать(). Но пустой/чужой JSON не должен стирать прогресс.
+        if not isinstance(данные, dict) or not isinstance(данные.get("sources"), dict):
+            raise ValueError("checkpoint должен содержать объект sources")
+        for поле in ("downloaded_ids", "normalized_ids"):
+            if поле == "normalized_ids" and поле not in данные:
+                continue
+            список = данные.get(поле)
+            if not isinstance(список, list) or not all(isinstance(ид, str) for ид in список):
+                raise ValueError(f"checkpoint должен содержать список строк {поле}")
+        if путь_state.exists() and not force:
+            return 0
+        if данные["downloaded_ids"]:
+            код = _восстановить_корпус(rclone, remote, base)
+            if код:
+                return код
+            if not any(p.suffix.lower() in {".pdf", ".docx", ".txt"}
+                       for p in (Path(_БАЗА) / "all_pdfs").rglob("*") if p.is_file()):
+                raise ValueError("checkpoint содержит downloaded_ids, но исходники не восстановлены")
+        os.replace(временный, путь_state)
+        print(f"[gdrive] state.json подтянут ({путь_state.stat().st_size // 1024} КБ)", flush=True)
         return 0
-    print(f"[gdrive] pull-state упал (rc={результат.returncode}): "
-          f"{результат.stderr.strip()}", flush=True)
-    return результат.returncode
+    except (OSError, ValueError) as ошибка:
+        print(f"[gdrive] pull-state не восстановлен: {ошибка}", flush=True)
+        return 1
+    finally:
+        if временный is not None:
+            временный.unlink(missing_ok=True)
 
 
 def main(argv=None) -> int:
@@ -242,14 +311,19 @@ def main(argv=None) -> int:
     ps = под.add_parser("pull-state",
                         help="Скачать state.json из Drive до парсинга")
     ps.add_argument("--dry-run", action="store_true")
+    ps.add_argument("--force", action="store_true",
+                    help="Заменить Git/локальный checkpoint проверенным файлом из Drive")
 
     args = парсер.parse_args(argv)
     if args.команда == "push":
-        залить(dry_run=args.dry_run, только_state=args.state_only)
+        try:
+            залить(dry_run=args.dry_run, только_state=args.state_only, strict=True)
+        except RuntimeError as ошибка:
+            print(f"[gdrive] ОШИБКА: {ошибка}", flush=True)
+            return 1
         return 0
     if args.команда == "pull-state":
-        подтянуть_state(dry_run=args.dry_run)
-        return 0
+        return подтянуть_state(dry_run=args.dry_run, force=args.force)
     return 2
 
 

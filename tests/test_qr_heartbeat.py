@@ -16,6 +16,9 @@ import time
 import types
 from pathlib import Path
 
+import pytest
+from unittest.mock import Mock
+
 # Загружаем модуль scripts/запуск.py напрямую — у него кириллическое имя,
 # обычный import не работает.
 ROOT = Path(__file__).resolve().parent.parent
@@ -188,3 +191,183 @@ def test_атомарность_записи_qr_status(tmp_path):
         f"читатель поймал файл в неконсистентном состоянии: "
         f"{нашли_кривое[:3]}"
     )
+
+
+def test_python312_предпочитает_проектное_окружение(tmp_path, monkeypatch):
+    mod = _загрузить_модуль(tmp_path)
+    проверить = Mock(return_value=types.SimpleNamespace(
+        returncode=0, stdout=str(tmp_path / "python.exe") + "\n"))
+    monkeypatch.setattr(mod.subprocess, "run", проверить)
+    monkeypatch.setattr(mod.shutil, "which", Mock(side_effect=AssertionError("uv не нужен")))
+
+    assert mod._найти_python312() == str(tmp_path / "python.exe")
+    assert проверить.call_count == 1
+    assert ".venv" in проверить.call_args.args[0][0]
+
+
+def test_python312_находит_uv_если_py_не_видит_его(tmp_path, monkeypatch):
+    mod = _загрузить_модуль(tmp_path)
+    uv_python = str(tmp_path / "uv python.exe")
+    команды = []
+
+    def выполнить(команда, **kwargs):
+        команды.append(команда)
+        if команда[0] == "uv.exe":
+            return types.SimpleNamespace(returncode=0, stdout=uv_python + "\n")
+        if команда[0] == uv_python:
+            return types.SimpleNamespace(returncode=0, stdout=uv_python + "\n")
+        return types.SimpleNamespace(returncode=1, stdout="")
+
+    monkeypatch.setattr(mod.subprocess, "run", выполнить)
+    monkeypatch.setattr(mod.shutil, "which", lambda _: "uv.exe")
+
+    assert mod._найти_python312() == uv_python
+    uv_поиск = next(к for к in команды if к[0] == "uv.exe")
+    assert "--offline" in uv_поиск and "--no-python-downloads" in uv_поиск
+
+
+def test_главный_сохраняет_аргументы_и_код_выхода_при_смене_python(tmp_path, monkeypatch):
+    mod = _загрузить_модуль(tmp_path)
+    python312 = str(tmp_path / "python312.exe")
+    monkeypatch.setattr(mod, "_найти_python312", lambda: python312)
+    monkeypatch.setattr(mod.sys, "argv", [str(СКРИПТ), "--lan", "дополнительный аргумент"])
+    вызвать = Mock(return_value=23)
+    monkeypatch.setattr(mod.subprocess, "call", вызвать)
+    запуск_qr = Mock()
+    monkeypatch.setattr(mod, "запустить_qr_сервер", запуск_qr)
+
+    with pytest.raises(SystemExit) as ошибка:
+        mod.главный()
+
+    assert ошибка.value.code == 23
+    assert вызвать.call_args.args[0] == [python312, str(СКРИПТ), "--lan", "дополнительный аргумент"]
+    запуск_qr.assert_not_called()
+
+
+def test_нет_python312_не_запускает_дочерние_процессы(tmp_path, monkeypatch, capsys):
+    mod = _загрузить_модуль(tmp_path)
+    monkeypatch.setattr(mod, "_найти_python312", lambda: None)
+    запустить = Mock()
+    monkeypatch.setattr(mod.subprocess, "Popen", запустить)
+
+    with pytest.raises(SystemExit) as ошибка:
+        mod.главный()
+
+    assert ошибка.value.code == 1
+    assert "Python 3.12" in capsys.readouterr().err
+    запустить.assert_not_called()
+
+
+def test_venv_symlink_to_base_python_still_reexecutes(tmp_path, monkeypatch):
+    mod = _загрузить_модуль(tmp_path)
+    base = str(tmp_path / "bin" / "python3.12")
+    venv = str(tmp_path / ".venv" / "bin" / "python")
+    monkeypatch.setattr(mod.sys, "executable", base)
+    monkeypatch.setattr(mod, "_найти_python312", lambda: venv)
+    # Эмулируем POSIX symlink без требования создавать symlink на Windows.
+    monkeypatch.setattr(mod.os.path, "realpath", lambda path: base)
+    call = Mock(return_value=0)
+    monkeypatch.setattr(mod.subprocess, "call", call)
+    with pytest.raises(SystemExit) as exc:
+        mod.главный()
+    assert exc.value.code == 0
+    assert call.call_args.args[0][0] == venv
+
+
+def test_running_in_selected_venv_does_not_reexec_loop(tmp_path, monkeypatch):
+    mod = _загрузить_модуль(tmp_path)
+    venv = str(tmp_path / ".venv" / "bin" / "python")
+    monkeypatch.setattr(mod.sys, "executable", venv)
+    monkeypatch.setattr(mod, "_найти_python312", lambda: venv)
+    call = Mock(side_effect=AssertionError("reexec loop"))
+    monkeypatch.setattr(mod.subprocess, "call", call)
+    monkeypatch.setattr(mod, "запустить_qr_сервер", Mock(side_effect=RuntimeError("startup reached")))
+    with pytest.raises(RuntimeError, match="startup reached"):
+        mod.главный()
+    call.assert_not_called()
+
+
+@pytest.mark.parametrize("цикл", ["стартовый_цикл", "стартовый_цикл_lan"])
+def test_занятый_порт_не_убивает_чужие_процессы(tmp_path, monkeypatch, цикл):
+    mod = _загрузить_модуль(tmp_path)
+    monkeypatch.setattr(mod, "порт_свободен", lambda _: False)
+    системная_команда = Mock(side_effect=AssertionError("Нельзя завершать чужие процессы"))
+    создать_процесс = Mock(side_effect=AssertionError("Порт занят"))
+    monkeypatch.setattr(mod.subprocess, "run", системная_команда)
+    monkeypatch.setattr(mod.subprocess, "Popen", создать_процесс)
+    состояние = mod.Состояние()
+    свой_процесс = Mock()
+    состояние.streamlit = свой_процесс
+
+    assert getattr(mod, цикл)(состояние) is False
+
+    свой_процесс.wait.assert_called_once()
+    assert состояние.streamlit is None
+    системная_команда.assert_not_called()
+    создать_процесс.assert_not_called()
+
+
+@pytest.mark.parametrize("проверка", ["streamlit_живой", "url_живой"])
+@pytest.mark.parametrize("статус,тело,ожидается", [
+    (200, b"ok", True),
+    (200, b"<html>tunnel login required</html>", False),
+    (404, b"not found", False),
+    (401, b"authorization required", False),
+    (503, b"unavailable", False),
+])
+def test_health_требует_реальный_ответ_streamlit(
+        tmp_path, monkeypatch, проверка, статус, тело, ожидается):
+    from unittest.mock import MagicMock
+
+    mod = _загрузить_модуль(tmp_path)
+    ответ = MagicMock()
+    ответ.__enter__.return_value = ответ
+    ответ.status = статус
+    ответ.read.return_value = тело[:16]
+    monkeypatch.setattr(mod.urllib.request, "urlopen", lambda *a, **kw: ответ)
+
+    аргументы = ["https://example.com"] if проверка == "url_живой" else []
+    assert getattr(mod, проверка)(*аргументы) is ожидается
+    ответ.__exit__.assert_called_once()
+
+
+@pytest.mark.parametrize("код", [401, 404, 503])
+def test_ошибка_http_не_считается_живым_туннелем(tmp_path, monkeypatch, код):
+    mod = _загрузить_модуль(tmp_path)
+    ошибка = mod.urllib.error.HTTPError("https://example.com", код, "error", None, None)
+    monkeypatch.setattr(mod.urllib.request, "urlopen", Mock(side_effect=ошибка))
+
+    assert mod.url_живой("https://example.com") is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows cmd launcher")
+@pytest.mark.parametrize("имя,флаги", [
+    ("запуск.cmd", []),
+    ("запуск_lan.cmd", ["--lan"]),
+    ("запуск_pub.cmd", []),
+])
+def test_cmd_передаёт_флаги_и_код_выхода(tmp_path, имя, флаги):
+    import shutil
+    import subprocess
+
+    папка = tmp_path / "scripts"
+    папка.mkdir()
+    for скрипт in ("запуск.cmd", "запуск_lan.cmd", "запуск_pub.cmd"):
+        shutil.copyfile(ROOT / "scripts" / скрипт, папка / скрипт)
+    бин = tmp_path / "bin"
+    бин.mkdir()
+    (бин / "py.cmd").write_text(
+        '@echo off\n> "%LAUNCH_ARGS%" echo %*\nexit /b 23\n', encoding="ascii")
+    аргументы = tmp_path / "args.txt"
+    окружение = {**os.environ, "PATH": str(бин) + os.pathsep + os.environ["PATH"],
+                 "LAUNCH_ARGS": str(аргументы)}
+
+    результат = subprocess.run(
+        ["cmd", "/d", "/c", f'call scripts\\{имя} --test-value'],
+        cwd=tmp_path, env=окружение, stdin=subprocess.DEVNULL,
+        capture_output=True, timeout=15,
+    )
+
+    assert результат.returncode == 23
+    assert аргументы.read_text(encoding="utf-8").strip().split() == [
+        "scripts\\запуск.py", *флаги, "--test-value"]

@@ -67,7 +67,7 @@ jobs:
           GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
         run: |
           mkdir -p harvester
-          python -m harvester.gdrive_rclone pull-state || echo "(state.json не найден — нормально для первого прогона)"
+          python -m harvester.gdrive_rclone pull-state --force
           # И chunks_v2.jsonl, если остался от предыдущего руна (резюме).
           rclone copyto "${GDRIVE_REMOTE}:${GDRIVE_BASE}/chunks_v2.jsonl" chunks_v2.jsonl --no-traverse 2>/dev/null || echo "(chunks_v2.jsonl не найден — начинаем с нуля)"
           if [ -f chunks_v2.jsonl ]; then echo "Найден chunks_v2.jsonl: $(wc -l < chunks_v2.jsonl) предыдущих чанков"; fi
