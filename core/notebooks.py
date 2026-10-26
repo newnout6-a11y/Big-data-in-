@@ -16,6 +16,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    HasIdCondition,
     MatchValue,
     PayloadSchemaType,
     PointStruct,
@@ -317,11 +318,11 @@ def переиндексировать_файл_с_ocr(
     """Заново индексирует уже загруженный PDF с включённым OCR картинок.
 
     Поведение:
-      1) Удаляет все точки этого файла из Qdrant (по фильтру user/notebook/file_hash).
-      2) Перечитывает PDF c `use_ocr=True` — caption'ы картинок-схем
+      1) Перечитывает PDF c `use_ocr=True` — caption'ы картинок-схем
          заполняются распознанным текстом (например «Отстойник
          непрерывного действия с вращающимися скребками…»).
-      3) Перестраивает чанки и заливает их в Qdrant.
+      2) Перестраивает чанки и заливает их в Qdrant.
+      3) Удаляет устаревшие точки файла, сохраняя новые.
       4) Обновляет запись файла в `notebooks.json` (счётчик чанков, флаг).
 
     Сам PDF на диске и каталог `extracted_images/<file_hash>/` не трогаем —
@@ -351,22 +352,6 @@ def переиндексировать_файл_с_ocr(
     ensure_collection(client, notebook)
 
     if on_progress:
-        on_progress("Удаляю старые точки из Qdrant…")
-    try:
-        client.delete(
-            collection_name=notebook["collection"],
-            points_selector=FilterSelector(
-                filter=Filter(must=[
-                    FieldCondition(key="user_id", match=MatchValue(value=user_id)),
-                    FieldCondition(key="notebook_id", match=MatchValue(value=notebook_id)),
-                    FieldCondition(key="file_hash", match=MatchValue(value=file_hash)),
-                ]),
-            ),
-        )
-    except Exception as ошибка:  # pragma: no cover - сетевые/локальные сбои
-        raise ValueError(f"Не удалось удалить старые точки: {ошибка}")
-
-    if on_progress:
         on_progress("Извлекаю текст и применяю OCR к картинкам…")
     pages = _extract_pdf(target, use_ocr=True)
     if not pages:
@@ -386,6 +371,28 @@ def переиндексировать_файл_с_ocr(
     if on_progress:
         on_progress(f"Заливаю {len(chunks)} чанков в Qdrant…")
     upsert_chunks(client, model, notebook["collection"], chunks)
+
+    # До успешной записи нового индекса старый остаётся доступным. При
+    # удалении исключаем новые ID: часть чанков могла остаться неизменной.
+    if on_progress:
+        on_progress("Удаляю устаревшие точки из Qdrant…")
+    try:
+        client.delete(
+            collection_name=notebook["collection"],
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+                        FieldCondition(key="notebook_id", match=MatchValue(value=notebook_id)),
+                        FieldCondition(key="file_hash", match=MatchValue(value=file_hash)),
+                    ],
+                    must_not=[HasIdCondition(has_id=[_chunk_point_id(chunk) for chunk in chunks])],
+                ),
+            ),
+            wait=True,
+        )
+    except Exception as ошибка:  # pragma: no cover - сетевые/локальные сбои
+        raise ValueError(f"Не удалось удалить старые точки: {ошибка}") from ошибка
 
     file_info["chunks"] = len(chunks)
     file_info["reindexed_at"] = _now_iso()
@@ -786,6 +793,13 @@ def _текст_для_эмбеддинга(chunk: dict[str, Any]) -> str:
     return хвост
 
 
+def _chunk_point_id(chunk: dict[str, Any]) -> str:
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"{chunk['notebook_id']}:{chunk['file_hash']}:{chunk['page']}:{chunk['chunk_index']}:{chunk['text_hash']}",
+    ))
+
+
 def upsert_chunks(client: Any, model: Any, collection: str, chunks: list[dict[str, Any]]) -> None:
     texts = [_текст_для_эмбеддинга(chunk) for chunk in chunks]
     vectors = model.encode(
@@ -795,11 +809,7 @@ def upsert_chunks(client: Any, model: Any, collection: str, chunks: list[dict[st
     )
     points = []
     for chunk, vector in zip(chunks, vectors):
-        point_id = str(uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            f"{chunk['notebook_id']}:{chunk['file_hash']}:{chunk['page']}:{chunk['chunk_index']}:{chunk['text_hash']}",
-        ))
-        points.append(PointStruct(id=point_id, vector=vector.tolist(), payload=chunk))
+        points.append(PointStruct(id=_chunk_point_id(chunk), vector=vector.tolist(), payload=chunk))
     client.upsert(collection_name=collection, points=points)
 
 

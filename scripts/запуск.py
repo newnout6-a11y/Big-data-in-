@@ -45,17 +45,42 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # Не молчим, а сразу даём понятную ошибку с инструкцией — иначе watchdog
 # будет вечно крутить рестарт-цикл, а пользователь не поймёт почему сайт
 # не открывается.
-if sys.version_info[:2] != (3, 12):
-    подсказка = (
-        f"\n[ОШИБКА] Запущено на Python {sys.version_info.major}."
-        f"{sys.version_info.minor}, а проект собран под 3.12.\n"
-        "  Запусти через:  py -3.12 scripts/запуск.py\n"
-        "  Или используй:  scripts/запуск.cmd  (двойной клик)\n"
-    )
-    print(подсказка, file=sys.stderr)
-    sys.exit(1)
+def _найти_python312():
+    """Находит установленный Python 3.12, не скачивая и не меняя окружение."""
+    def проверить(команда):
+        try:
+            найден = subprocess.run(
+                [*команда, "-c", "import sys; "
+                 "sys.exit(1) if sys.version_info[:2] != (3, 12) else "
+                 "print(sys.executable)"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if найден.returncode == 0 and найден.stdout.strip():
+                return найден.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return None
 
-import qrcode
+    локальный = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                             ".venv", "Scripts" if os.name == "nt" else "bin",
+                             "python.exe" if os.name == "nt" else "python")
+    for команда in ([локальный], [sys.executable], ["py", "-3.12"]):
+        путь = проверить(команда)
+        if путь:
+            return путь
+    uv = shutil.which("uv")
+    if uv:
+        try:
+            найден = subprocess.run(
+                [uv, "python", "find", "3.12", "--no-project", "--offline",
+                 "--no-python-downloads"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if найден.returncode == 0 and найден.stdout.strip():
+                return проверить([найден.stdout.strip()])
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return None
 
 # ─────────────────────────────────────────────────────────────────────────
 # Константы
@@ -143,10 +168,9 @@ def открыть_лог(путь):
 
 def порт_свободен(порт):
     try:
-        с = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        с.settimeout(0.5)
-        с.bind(("127.0.0.1", порт))
-        с.close()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as с:
+            с.settimeout(0.5)
+            с.bind(("127.0.0.1", порт))
         return True
     except OSError:
         return False
@@ -160,10 +184,10 @@ def streamlit_живой(таймаут=HEALTH_TIMEOUT):
     идёт через event loop, ловит зависания.
     """
     try:
-        urllib.request.urlopen(
+        with urllib.request.urlopen(
             f"http://127.0.0.1:{ПОРТ}/_stcore/health", timeout=таймаут,
-        )
-        return True
+        ) as ответ:
+            return ответ.status == 200 and ответ.read(16).strip() == b"ok"
     except (urllib.error.URLError, ConnectionError, socket.timeout, OSError):
         return False
 
@@ -188,55 +212,12 @@ def url_живой(url, таймаут=8):
                 "ngrok-skip-browser-warning": "1",
             },
         )
-        с_ответом = urllib.request.urlopen(запрос, timeout=таймаут)
-        return с_ответом.status < 500
-    except urllib.error.HTTPError as e:
-        return e.code < 500
+        with urllib.request.urlopen(запрос, timeout=таймаут) as ответ:
+            return ответ.status == 200 and ответ.read(16).strip() == b"ok"
+    except urllib.error.HTTPError:
+        return False
     except Exception:
         return False
-
-
-def завершить_старые():
-    """Аккуратно убивает прежние процессы перед стартом."""
-    for имя in ("ssh.exe", "cloudflared.exe", "ngrok.exe"):
-        try:
-            subprocess.run(["taskkill", "/F", "/IM", имя],
-                           capture_output=True, timeout=5)
-        except Exception:
-            pass
-
-    # Что слушает наш порт — убить
-    try:
-        netstat = subprocess.run(
-            ["netstat", "-ano", "-p", "tcp"],
-            capture_output=True, text=True, encoding="cp866", errors="ignore",
-            timeout=10,
-        )
-        pids = set()
-        for строка in netstat.stdout.splitlines():
-            if f":{ПОРТ}" in строка and "LISTENING" in строка.upper():
-                части = строка.split()
-                if части and части[-1].isdigit():
-                    pids.add(части[-1])
-        for pid in pids:
-            subprocess.run(["taskkill", "/F", "/PID", pid],
-                           capture_output=True, timeout=5)
-    except Exception:
-        pass
-
-    # Прежние Streamlit-процессы по командной строке
-    try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_Process | "
-             "Where-Object { $_.Name -in 'python.exe','pythonw.exe' -and "
-             "$_.CommandLine -like '*ui\\app.py*' } | "
-             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
-             "-ErrorAction SilentlyContinue }"],
-            capture_output=True, timeout=10,
-        )
-    except Exception:
-        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -495,6 +476,8 @@ def запустить_туннель():
 # ─────────────────────────────────────────────────────────────────────────
 
 def сгенерировать_qr(url):
+    import qrcode
+
     qrcode.make(url).save(ПУТЬ_QR)
     return ПУТЬ_QR
 
@@ -987,11 +970,11 @@ class Состояние:
 
 
 def стартовый_цикл(состояние: Состояние) -> bool:
-    завершить_старые()
-    time.sleep(2)
-
+    состояние.закрыть()
     if not порт_свободен(ПОРТ):
-        time.sleep(3)
+        печать(f"Порт {ПОРТ} занят. Остановите прежний launcher или выберите NAV_PORT.",
+               метка="error")
+        return False
 
     печать(f"Запускаю Streamlit (порт {ПОРТ}, ждём health …)")
     состояние.streamlit = запустить_streamlit()
@@ -1028,11 +1011,11 @@ def стартовый_цикл_lan(состояние: Состояние) -> b
     QR-страница и watchdog работают как обычно, только проверка
     «внешнего URL» идёт по LAN-адресу (он точно отвечает пока сетевая
     карта жива), а не по https://*.lhr.life."""
-    завершить_старые()
-    time.sleep(2)
-
+    состояние.закрыть()
     if not порт_свободен(ПОРТ):
-        time.sleep(3)
+        печать(f"Порт {ПОРТ} занят. Остановите прежний launcher или выберите NAV_PORT.",
+               метка="error")
+        return False
 
     печать(f"Запускаю Streamlit на 0.0.0.0:{ПОРТ} (LAN-режим, без туннеля)")
     состояние.streamlit = запустить_streamlit()
@@ -1122,6 +1105,21 @@ def watchdog(состояние: Состояние, остановлен_callba
 
 
 def главный():
+    python312 = _найти_python312()
+    if python312 is None:
+        print("[ОШИБКА] Нужен Python 3.12. Установите его или создайте .venv на 3.12.",
+              file=sys.stderr)
+        raise SystemExit(1)
+    if os.path.normcase(os.path.realpath(python312)) != os.path.normcase(os.path.realpath(sys.executable)):
+        raise SystemExit(subprocess.call([python312, os.path.abspath(__file__), *sys.argv[1:]]))
+    try:
+        import qrcode
+        import streamlit
+    except ImportError as ошибка:
+        print(f"[ОШИБКА] Не установлены зависимости launcher: {ошибка}.\n"
+              f'  "{sys.executable}" -m pip install -r requirements.txt', file=sys.stderr)
+        raise SystemExit(1) from ошибка
+
     print("=" * 64)
     print("  НАВИГАТОР · публичный запуск (с watchdog)")
     print("=" * 64)

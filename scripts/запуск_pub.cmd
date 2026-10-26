@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 rem Публичный запуск через ngrok (стабильный URL).
 rem
 rem ПЕРЕД ПЕРВЫМ ЗАПУСКОМ:
@@ -10,6 +11,4 @@ rem   5. Прописать его в .env как NGROK_DOMAIN=<твой-под�
 rem
 rem .env подхватывается launcher'ом автоматически.
 
-cd /d "%~dp0\.."
-py -3.12 scripts\запуск.py
-pause
+call "%~dp0запуск.cmd" %*

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import io
 import json
 import mimetypes
@@ -553,7 +554,11 @@ def build_apkg(cards: list[dict[str, Any]], deck_name: str, *, package_id: str =
             continue
         note = genanki.Note(
             model=model,
-            fields=[front, f"{back}<br><br><small>{source}</small>" if source else back],
+            fields=[
+                html.escape(front),
+                (f"{html.escape(back)}<br><br><small>{html.escape(source)}</small>"
+                 if source else html.escape(back)),
+            ],
             guid=hashlib.sha1(f"{package_id}|{front}|{back}".encode("utf-8")).hexdigest(),
         )
         deck.add_note(note)

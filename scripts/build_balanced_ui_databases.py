@@ -17,6 +17,9 @@
    subdomain внутри домена, с учётом фактической ёмкости.
 3. Второй проход берёт равномерный срез по всему JSONL внутри каждой группы,
    чтобы база не состояла только из первых документов экспорта.
+Повреждённые точки пропускаются, повторные ID учитываются только один раз
+(сохраняется первая валидная запись). Существующая база заменяется только
+при явном --recreate; занятая другим клиентом база не изменяется.
 
 Использование:
     python scripts/build_balanced_ui_databases.py
@@ -27,17 +30,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
+import math
 import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
+from uuid import UUID
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     BinaryQuantization,
     BinaryQuantizationConfig,
     Distance,
+    Filter,
     Modifier,
     PayloadSchemaType,
     PointStruct,
@@ -74,24 +79,39 @@ def _группа(payload: dict) -> tuple[str, str]:
 
 
 def _точка_из_obj(obj: dict) -> PointStruct | None:
-    vec = obj.get("vector") or {}
-    if not isinstance(vec, dict):
+    try:
+        vec = obj["vector"]
+        dense = vec["dense"]
+        sparse = vec["sparse"]
+        if len(dense) != РАЗМЕР_ВЕКТОРА or not all(math.isfinite(v) for v in dense):
+            return None
+        if len(sparse["indices"]) != len(sparse["values"]):
+            return None
+        indices = sparse["indices"]
+        if any(type(i) is not int or not 0 <= i < 2**32 for i in indices):
+            return None
+        if len(set(indices)) != len(indices):
+            return None
+        if not all(math.isfinite(v) for v in sparse["values"]):
+            return None
+        point_id = obj["id"]
+        if isinstance(point_id, str):
+            point_id = str(UUID(point_id))
+        elif type(point_id) is not int or not 0 <= point_id < 2**64:
+            return None
+        return PointStruct(
+            id=point_id,
+            vector={
+                "dense": list(dense),
+                "sparse": SparseVector(
+                    indices=list(sparse["indices"]),
+                    values=list(sparse["values"]),
+                ),
+            },
+            payload=obj.get("payload") or {},
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
         return None
-    dense = vec.get("dense")
-    sparse = vec.get("sparse") or {}
-    if not dense or not sparse.get("indices"):
-        return None
-    return PointStruct(
-        id=obj["id"],
-        vector={
-            "dense": list(dense),
-            "sparse": SparseVector(
-                indices=list(sparse["indices"]),
-                values=list(sparse["values"]),
-            ),
-        },
-        payload=obj.get("payload") or {},
-    )
 
 
 def _waterfill(capacity: dict, total: int) -> dict:
@@ -102,7 +122,7 @@ def _waterfill(capacity: dict, total: int) -> dict:
     while remaining > 0 and active:
         share = max(1, remaining // len(active))
         changed = False
-        for key in list(active):
+        for key in sorted(active):
             room = capacity[key] - result[key]
             if room <= 0:
                 active.remove(key)
@@ -152,13 +172,19 @@ def _нужно_взять(seen_in_group: int, group_total: int, quota: int) -> 
 
 
 def _создать_коллекцию(path: Path, recreate: bool) -> QdrantClient:
-    if recreate and path.exists():
-        print(f"Удаляю {path}...")
-        shutil.rmtree(path)
     path.mkdir(parents=True, exist_ok=True)
 
+    # Сначала получаем блокировку Qdrant. Удалять каталог до открытия
+    # клиента опасно: его может использовать работающий Streamlit.
     client = QdrantClient(path=str(path))
     collections = {c.name for c in client.get_collections().collections}
+    if recreate and КОЛЛЕКЦИЯ in collections:
+        print(f"Пересоздаю {КОЛЛЕКЦИЯ} в {path}...")
+        # На Windows удаление каталога коллекции может не удалить открытую
+        # SQLite. Явно очищаем точки, чтобы они не появились после recreate.
+        client.delete(collection_name=КОЛЛЕКЦИЯ, points_selector=Filter(), wait=True)
+        client.delete_collection(КОЛЛЕКЦИЯ)
+        collections.remove(КОЛЛЕКЦИЯ)
     if КОЛЛЕКЦИЯ not in collections:
         client.create_collection(
             collection_name=КОЛЛЕКЦИЯ,
@@ -215,13 +241,26 @@ def main(argv: list[str] | None = None) -> int:
 
     input_path = Path(args.input)
     output_dir = Path(args.output_dir)
-    sizes = _parse_sizes(args.sizes)
+    try:
+        sizes = _parse_sizes(args.sizes)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not sizes or args.batch <= 0:
+        parser.error("Укажите хотя бы один размер и положительный --batch")
     if not input_path.exists():
         print(f"Нет файла {input_path}", file=sys.stderr)
         return 1
+    for size in sizes:
+        path = output_dir / str(size)
+        if args.recreate and input_path.resolve().is_relative_to(path.resolve()):
+            parser.error("Входной JSONL должен находиться вне пересоздаваемой базы")
+        if path.exists() and not args.recreate:
+            print(f"База {path} уже существует; для замены укажите --recreate", file=sys.stderr)
+            return 1
 
     print(f"Считаю распределение в {input_path}...", flush=True)
     counts: Counter = Counter()
+    seen_ids = set()
     bad = 0
     started = time.time()
     with input_path.open("r", encoding="utf-8") as f:
@@ -230,14 +269,21 @@ def main(argv: list[str] | None = None) -> int:
             if not line:
                 continue
             try:
-                payload = (json.loads(line).get("payload") or {})
-                counts[_группа(payload)] += 1
-            except Exception:
+                point = _точка_из_obj(json.loads(line))
+                if point is None:
+                    bad += 1
+                    continue
+                if point.id in seen_ids:
+                    continue
+                seen_ids.add(point.id)
+                counts[_группа(point.payload)] += 1
+            except (TypeError, ValueError):
                 bad += 1
             if line_no % 100_000 == 0:
                 print(f"  просмотрено строк: {line_no}", flush=True)
 
     total_points = sum(counts.values())
+    seen_ids.clear()
     print(f"Валидных точек: {total_points}; битых строк: {bad}")
     if not total_points:
         return 1
@@ -268,9 +314,14 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 try:
                     obj = json.loads(line)
-                    payload = obj.get("payload") or {}
-                    group = _группа(payload)
-                except Exception:
+                    point = _точка_из_obj(obj)
+                    if point is None:
+                        continue
+                    if point.id in seen_ids:
+                        continue
+                    seen_ids.add(point.id)
+                    group = _группа(point.payload)
+                except (TypeError, ValueError):
                     continue
 
                 seen_by_group[group] += 1
@@ -285,9 +336,6 @@ def main(argv: list[str] | None = None) -> int:
                 if not selected_sizes:
                     continue
 
-                point = _точка_из_obj(obj)
-                if point is None:
-                    continue
                 for size in selected_sizes:
                     batches[size].append(point)
                     if len(batches[size]) >= args.batch:

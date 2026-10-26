@@ -93,6 +93,13 @@ jobs:
           # sanity-check: видим ли remote
           rclone listremotes --config "$HOME/.config/rclone/rclone.conf"
 
+      - name: Restore Drive checkpoint before the first iteration
+        if: ${{ env.RCLONE_CONFIG_CONTENT != '' }}
+        env:
+          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
+        run: python -m harvester.gdrive_rclone pull-state --force
+
       - name: Run harvester.loop (бесконечный цикл внутри runner'а до timeout)
         env:
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
