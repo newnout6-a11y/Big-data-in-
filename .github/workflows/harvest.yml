@@ -93,10 +93,10 @@ jobs:
           # sanity-check: видим ли remote
           rclone listremotes --config "$HOME/.config/rclone/rclone.conf"
 
-      - name: Restore Drive checkpoint before the first iteration
+      - name: Restore Drive sources and checkpoint before the first iteration
         if: ${{ env.RCLONE_CONFIG_CONTENT != '' }}
         env:
-          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_REMOTE: ${{ env.RCLONE_CONFIG_CONTENT != '' && (vars.GDRIVE_REMOTE || 'gdrive') || '' }}
           GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
         run: python -m harvester.gdrive_rclone pull-state --force
 
@@ -115,7 +115,7 @@ jobs:
           S3_REGION: ${{ secrets.S3_REGION }}
           S3_PREFIX: ${{ secrets.S3_PREFIX }}
           # Google Drive через rclone:
-          GDRIVE_REMOTE: ${{ vars.GDRIVE_REMOTE || 'gdrive' }}
+          GDRIVE_REMOTE: ${{ env.RCLONE_CONFIG_CONTENT != '' && (vars.GDRIVE_REMOTE || 'gdrive') || '' }}
           GDRIVE_BASE: ${{ vars.GDRIVE_BASE || 'big-data' }}
           # В harvest pipeline картинки из PDF извлекать не нужно
           # (раздувают Drive, не используются в RAG для harvest-корпуса).

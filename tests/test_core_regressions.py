@@ -90,6 +90,101 @@ def test_successful_ocr_reindex_replaces_only_obsolete_points(indexed_notebook, 
     assert stored["chunks"] == 2
 
 
+@pytest.mark.parametrize("partial_delete", [False, True])
+def test_failed_ocr_cleanup_restores_payloads_vectors_and_old_points(indexed_notebook, monkeypatch, partial_delete):
+    nb, notebook, client, pages = indexed_notebook
+    before = client.scroll(notebook["collection"], limit=20, with_vectors=True)[0]
+    scroll = client.scroll
+    def paginated_scroll(*args, **kwargs):
+        if "scroll_filter" in kwargs:
+            kwargs["limit"] = 1
+        return scroll(*args, **kwargs)
+    monkeypatch.setattr(client, "scroll", paginated_scroll)
+    updated = [pages[0], {"page": 3, "text": "New OCR content. " * 10}]
+    monkeypatch.setattr(nb, "_extract_pdf", lambda *a, **kw: updated)
+    build = nb.build_chunks
+
+    def changed_payload(*args, **kwargs):
+        chunks = build(*args, **kwargs)
+        for chunk in chunks:
+            chunk["ocr_test"] = "new payload on an unchanged ID"
+        return chunks
+
+    monkeypatch.setattr(nb, "build_chunks", changed_payload)
+    model = _Model()
+    monkeypatch.setattr(model, "encode", lambda texts, **kw: np.array([[0., 1., 0.] for _ in texts]))
+    delete = client.delete
+    calls = []
+
+    def failing_delete(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            if partial_delete:
+                delete(*args, **kwargs)
+            raise RuntimeError("cleanup failed")
+        return delete(*args, **kwargs)
+
+    monkeypatch.setattr(client, "delete", failing_delete)
+    with pytest.raises(ValueError, match="прежний индекс восстановлен"):
+        nb.переиндексировать_файл_с_ocr(client, model, notebook["id"], "file1", user_id="user")
+    after = client.scroll(notebook["collection"], limit=20, with_vectors=True)[0]
+    assert {p.id: (p.payload, p.vector) for p in after} == {p.id: (p.payload, p.vector) for p in before}
+    assert "reindexed_at" not in nb.get_notebook(notebook["id"], "user")["files"][0]
+    assert len(calls) == 2
+
+
+def test_partial_ocr_upsert_is_rolled_back(indexed_notebook, monkeypatch):
+    nb, notebook, client, pages = indexed_notebook
+    before = client.scroll(notebook["collection"], limit=20, with_vectors=True)[0]
+    monkeypatch.setattr(nb, "_extract_pdf", lambda *a, **kw: [{"page": 3, "text": "New OCR data. " * 10}])
+    upsert = client.upsert
+    calls = []
+    def partial_write(*args, **kwargs):
+        calls.append(kwargs)
+        result = upsert(*args, **kwargs)
+        if len(calls) == 1:
+            raise RuntimeError("lost acknowledgement after upsert")
+        return result
+    monkeypatch.setattr(client, "upsert", partial_write)
+    with pytest.raises(ValueError, match="прежний индекс восстановлен"):
+        nb.переиндексировать_файл_с_ocr(client, _Model(), notebook["id"], "file1", user_id="user")
+    after = client.scroll(notebook["collection"], limit=20, with_vectors=True)[0]
+    assert {p.id: (p.payload, p.vector) for p in after} == {p.id: (p.payload, p.vector) for p in before}
+
+
+def test_ocr_snapshot_failure_does_not_start_writes(indexed_notebook, monkeypatch):
+    nb, notebook, client, pages = indexed_notebook
+    monkeypatch.setattr(nb, "_extract_pdf", lambda *a, **kw: pages)
+    def fail_read(*args, **kwargs):
+        raise RuntimeError("snapshot failed")
+    def unexpected_write(*args, **kwargs):
+        pytest.fail("No writes without a complete snapshot")
+    monkeypatch.setattr(client, "scroll", fail_read)
+    monkeypatch.setattr(client, "upsert", unexpected_write)
+    monkeypatch.setattr(client, "delete", unexpected_write)
+    with pytest.raises(RuntimeError, match="snapshot failed"):
+        nb.переиндексировать_файл_с_ocr(client, _Model(), notebook["id"], "file1", user_id="user")
+
+
+def test_ocr_reports_failure_to_roll_back(indexed_notebook, monkeypatch):
+    nb, notebook, client, pages = indexed_notebook
+    monkeypatch.setattr(nb, "_extract_pdf", lambda *a, **kw: pages)
+    monkeypatch.setattr(client, "delete", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("offline")))
+    upsert = client.upsert
+    calls = []
+
+    def fail_rollback(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) > 1:
+            raise RuntimeError("still offline")
+        return upsert(*args, **kwargs)
+
+    monkeypatch.setattr(client, "upsert", fail_rollback)
+    with pytest.raises(ValueError, match="Откат не завершён"):
+        nb.переиндексировать_файл_с_ocr(client, _Model(), notebook["id"], "file1", user_id="user")
+    assert "reindexed_at" not in nb.get_notebook(notebook["id"], "user")["files"][0]
+
+
 def test_anki_export_keeps_angle_brackets_and_ampersands_as_text(tmp_path):
     pytest.importorskip("genanki")
     from study_tools import build_apkg

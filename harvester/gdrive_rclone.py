@@ -18,7 +18,7 @@
 
 Команды CLI:
 
-    python -m harvester.gdrive_rclone pull-state    # скачать state.json до парсинга
+    python -m harvester.gdrive_rclone pull-state    # восстановить исходники и state.json
     python -m harvester.gdrive_rclone pull-state --force  # восстановить свежий runner
     python -m harvester.gdrive_rclone push          # залить всё после парсинга
     python -m harvester.gdrive_rclone push --state-only  # быстрый сейв чекпоинта
@@ -191,12 +191,34 @@ def залить(dry_run: bool = False, только_state: bool = False, *, str
     return успешных
 
 
+def _восстановить_корпус(rclone: str, remote: str, base: str) -> int:
+    """Восстанавливает исходники для повторного ingest/embed на свежем runner."""
+    for локальная_папка, подпапка, фильтр in _МАРШРУТЫ:
+        destination = Path(_БАЗА) / локальная_папка
+        destination.mkdir(parents=True, exist_ok=True)
+        команда = [rclone, *_аргументы_конфига(), "copy",
+                   f"{remote}:{base}/{подпапка}/", str(destination), "--quiet"]
+        if фильтр:
+            команда.extend(["--include", фильтр])
+        print(f"[gdrive] $ {' '.join(команда)}", flush=True)
+        результат = subprocess.run(команда, check=False, capture_output=True, text=True)
+        if результат.returncode:
+            # Пустые маршруты push не создаёт: например, DOCX/картинок
+            # в корпусе могло никогда не быть. Сетевые ошибки не скрываем.
+            if результат.returncode == 3 and "directory not found" in (результат.stderr or "").lower():
+                continue
+            print(f"[gdrive] Не восстановлен {подпапка}: {результат.stderr}", flush=True)
+            return результат.returncode
+    return 0
+
+
 def подтянуть_state(dry_run: bool = False, *, force: bool = False) -> int:
     """Скачивает state.json из Drive в `harvester/state.json`.
 
     По умолчанию сохраняет локальный прогресс между итерациями loop.
     Свежий checkout уже содержит state.json из Git: перед loop нужен один
-    вызов с force=True. Скачанное проверяется до атомарной замены файла.
+    вызов с force=True. До атомарной замены checkpoint восстанавливаем
+    исходники: downloaded_ids ещё не означают успешную векторизацию.
     Отсутствие checkpoint в Drive нормально для первого запуска.
     """
     путь_state = Path(_БАЗА) / "harvester" / ИМЯ_ФАЙЛА_СОСТОЯНИЯ
@@ -256,6 +278,13 @@ def подтянуть_state(dry_run: bool = False, *, force: bool = False) -> i
                 raise ValueError(f"checkpoint должен содержать список строк {поле}")
         if путь_state.exists() and not force:
             return 0
+        if данные["downloaded_ids"]:
+            код = _восстановить_корпус(rclone, remote, base)
+            if код:
+                return код
+            if not any(p.suffix.lower() in {".pdf", ".docx", ".txt"}
+                       for p in (Path(_БАЗА) / "all_pdfs").rglob("*") if p.is_file()):
+                raise ValueError("checkpoint содержит downloaded_ids, но исходники не восстановлены")
         os.replace(временный, путь_state)
         print(f"[gdrive] state.json подтянут ({путь_state.stat().st_size // 1024} КБ)", flush=True)
         return 0

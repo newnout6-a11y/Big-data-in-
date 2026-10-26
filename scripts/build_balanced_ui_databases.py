@@ -177,6 +177,15 @@ def _создать_коллекцию(path: Path, recreate: bool) -> QdrantClie
     # Сначала получаем блокировку Qdrant. Удалять каталог до открытия
     # клиента опасно: его может использовать работающий Streamlit.
     client = QdrantClient(path=str(path))
+    try:
+        _подготовить_коллекцию(client, path, recreate)
+        return client
+    except Exception:
+        client.close()
+        raise
+
+
+def _подготовить_коллекцию(client: QdrantClient, path: Path, recreate: bool) -> None:
     collections = {c.name for c in client.get_collections().collections}
     if recreate and КОЛЛЕКЦИЯ in collections:
         print(f"Пересоздаю {КОЛЛЕКЦИЯ} в {path}...")
@@ -210,7 +219,6 @@ def _создать_коллекцию(path: Path, recreate: bool) -> QdrantClie
             client.create_payload_index(КОЛЛЕКЦИЯ, field, schema_type)
         except Exception:
             pass
-    return client
 
 
 def _parse_sizes(raw: str) -> list[int]:
@@ -302,7 +310,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for size in sizes:
             path = output_dir / str(size)
-            clients[size] = _создать_коллекцию(path, args.recreate)
+            path.mkdir(parents=True, exist_ok=True)
+            clients[size] = QdrantClient(path=str(path))
+        # Ни одну коллекцию не очищаем, пока не получены ВСЕ блокировки.
+        for size, client in clients.items():
+            _подготовить_коллекцию(client, output_dir / str(size), args.recreate)
             batches[size] = []
 
         seen_by_group: Counter = Counter()

@@ -106,6 +106,23 @@ def test_recreate_does_not_delete_a_database_open_in_another_client(tmp_path):
         assert client.count(builder.КОЛЛЕКЦИЯ).count == 1
 
 
+def test_later_database_lock_preserves_all_earlier_databases(tmp_path):
+    source = tmp_path / "input.jsonl"
+    source.write_text(json.dumps(_point(2)), encoding="utf-8")
+    output = tmp_path / "databases"
+    with closing(builder._создать_коллекцию(output / "1", False)) as first:
+        first.upsert(builder.КОЛЛЕКЦИЯ, [builder._точка_из_obj(_point(1))])
+    with closing(builder._создать_коллекцию(output / "2", False)) as owner:
+        owner.upsert(builder.КОЛЛЕКЦИЯ, [builder._точка_из_obj(_point(3))])
+        with pytest.raises(RuntimeError, match="already accessed"):
+            builder.main(["--input", str(source), "--output-dir", str(output),
+                          "--sizes", "1,2", "--recreate"])
+        # Повторное открытие также подтверждает освобождение первой блокировки.
+        with closing(QdrantClient(path=str(output / "1"))) as first:
+            assert [p.id for p in first.scroll(builder.КОЛЛЕКЦИЯ)[0]] == [1]
+        assert [p.id for p in owner.scroll(builder.КОЛЛЕКЦИЯ)[0]] == [3]
+
+
 @pytest.mark.parametrize("args", [["--sizes", ""], ["--sizes", "0"], ["--batch", "0"], ["--batch", "-1"]])
 def test_invalid_options_fail_before_creating_databases(tmp_path, args):
     output = tmp_path / "databases"

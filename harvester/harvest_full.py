@@ -95,8 +95,10 @@ def main(argv=None):
         отчёт["steps"]["ingest"] = {"return_code": 124, "seconds": 0, "reason": "deadline"}
 
     # Шаг 2.5 — РАННИЙ push в Drive после ingest (до медленного embed).
-    # Гарантирует что PDF + chunks_v2.jsonl + state.json уже на Drive
-    # ДАЖЕ ЕСЛИ embed зависнет на часы и runner будет убит timeout-ом.
+    # Сохраняет исходники, метаданные и state.json на Drive, даже если
+    # embed зависнет на часы и runner будет убит по timeout.
+    # При восстановлении исходники скачиваются ДО checkpoint, поэтому
+    # ingest/embed смогут повториться даже без локального chunks_v2.jsonl.
     if os.getenv("GDRIVE_REMOTE") or os.getenv("RCLONE_CONFIG"):
         команда_early_push = [sys.executable, "-m", "harvester.gdrive_rclone", "push"]
         код_ep, дл_ep = _запустить(команда_early_push, окруж)

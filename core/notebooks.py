@@ -19,6 +19,7 @@ from qdrant_client.models import (
     HasIdCondition,
     MatchValue,
     PayloadSchemaType,
+    PointIdsList,
     PointStruct,
     VectorParams,
 )
@@ -368,31 +369,51 @@ def переиндексировать_файл_с_ocr(
     if not chunks:
         raise ValueError("После переиндексации не удалось построить чанки.")
 
-    if on_progress:
-        on_progress(f"Заливаю {len(chunks)} чанков в Qdrant…")
-    upsert_chunks(client, model, notebook["collection"], chunks)
-
-    # До успешной записи нового индекса старый остаётся доступным. При
-    # удалении исключаем новые ID: часть чанков могла остаться неизменной.
-    if on_progress:
-        on_progress("Удаляю устаревшие точки из Qdrant…")
+    file_filter = Filter(must=[
+        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+        FieldCondition(key="notebook_id", match=MatchValue(value=notebook_id)),
+        FieldCondition(key="file_hash", match=MatchValue(value=file_hash)),
+    ])
+    # Снимок включает payload и векторы: upsert может перезаписать точки
+    # с прежними ID, а неудачный delete — успеть удалить часть старых.
+    previous = []
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=notebook["collection"], scroll_filter=file_filter,
+            limit=256, offset=offset, with_payload=True, with_vectors=True,
+        )
+        previous.extend(PointStruct(id=p.id, vector=p.vector, payload=p.payload) for p in points)
+        if offset is None:
+            break
+    new_ids = {_chunk_point_id(chunk) for chunk in chunks}
     try:
+        if on_progress:
+            on_progress(f"Заливаю {len(chunks)} чанков в Qdrant…")
+        upsert_chunks(client, model, notebook["collection"], chunks)
+        if on_progress:
+            on_progress("Удаляю устаревшие точки из Qdrant…")
         client.delete(
             collection_name=notebook["collection"],
             points_selector=FilterSelector(
                 filter=Filter(
-                    must=[
-                        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
-                        FieldCondition(key="notebook_id", match=MatchValue(value=notebook_id)),
-                        FieldCondition(key="file_hash", match=MatchValue(value=file_hash)),
-                    ],
-                    must_not=[HasIdCondition(has_id=[_chunk_point_id(chunk) for chunk in chunks])],
+                    must=file_filter.must,
+                    must_not=[HasIdCondition(has_id=list(new_ids))],
                 ),
             ),
             wait=True,
         )
-    except Exception as ошибка:  # pragma: no cover - сетевые/локальные сбои
-        raise ValueError(f"Не удалось удалить старые точки: {ошибка}") from ошибка
+    except Exception as ошибка:
+        try:
+            if previous:
+                client.upsert(collection_name=notebook["collection"], points=previous, wait=True)
+            introduced = new_ids - {p.id for p in previous}
+            if introduced:
+                client.delete(collection_name=notebook["collection"],
+                              points_selector=PointIdsList(points=list(introduced)), wait=True)
+        except Exception as откат:
+            raise ValueError(f"Ошибка переиндексации: {ошибка}. Откат не завершён: {откат}") from ошибка
+        raise ValueError(f"Переиндексация отменена, прежний индекс восстановлен: {ошибка}") from ошибка
 
     file_info["chunks"] = len(chunks)
     file_info["reindexed_at"] = _now_iso()

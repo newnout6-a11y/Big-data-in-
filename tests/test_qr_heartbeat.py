@@ -258,6 +258,35 @@ def test_нет_python312_не_запускает_дочерние_процес�
     запустить.assert_not_called()
 
 
+def test_venv_symlink_to_base_python_still_reexecutes(tmp_path, monkeypatch):
+    mod = _загрузить_модуль(tmp_path)
+    base = str(tmp_path / "bin" / "python3.12")
+    venv = str(tmp_path / ".venv" / "bin" / "python")
+    monkeypatch.setattr(mod.sys, "executable", base)
+    monkeypatch.setattr(mod, "_найти_python312", lambda: venv)
+    # Эмулируем POSIX symlink без требования создавать symlink на Windows.
+    monkeypatch.setattr(mod.os.path, "realpath", lambda path: base)
+    call = Mock(return_value=0)
+    monkeypatch.setattr(mod.subprocess, "call", call)
+    with pytest.raises(SystemExit) as exc:
+        mod.главный()
+    assert exc.value.code == 0
+    assert call.call_args.args[0][0] == venv
+
+
+def test_running_in_selected_venv_does_not_reexec_loop(tmp_path, monkeypatch):
+    mod = _загрузить_модуль(tmp_path)
+    venv = str(tmp_path / ".venv" / "bin" / "python")
+    monkeypatch.setattr(mod.sys, "executable", venv)
+    monkeypatch.setattr(mod, "_найти_python312", lambda: venv)
+    call = Mock(side_effect=AssertionError("reexec loop"))
+    monkeypatch.setattr(mod.subprocess, "call", call)
+    monkeypatch.setattr(mod, "запустить_qr_сервер", Mock(side_effect=RuntimeError("startup reached")))
+    with pytest.raises(RuntimeError, match="startup reached"):
+        mod.главный()
+    call.assert_not_called()
+
+
 @pytest.mark.parametrize("цикл", ["стартовый_цикл", "стартовый_цикл_lan"])
 def test_занятый_порт_не_убивает_чужие_процессы(tmp_path, monkeypatch, цикл):
     mod = _загрузить_модуль(tmp_path)

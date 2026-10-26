@@ -1110,7 +1110,9 @@ def главный():
         print("[ОШИБКА] Нужен Python 3.12. Установите его или создайте .venv на 3.12.",
               file=sys.stderr)
         raise SystemExit(1)
-    if os.path.normcase(os.path.realpath(python312)) != os.path.normcase(os.path.realpath(sys.executable)):
+    # POSIX .venv/bin/python обычно ссылается на базовый Python. realpath
+    # склеивает разные окружения, хотя наборы пакетов у них различаются.
+    if os.path.normcase(os.path.abspath(python312)) != os.path.normcase(os.path.abspath(sys.executable)):
         raise SystemExit(subprocess.call([python312, os.path.abspath(__file__), *sys.argv[1:]]))
     try:
         import qrcode
